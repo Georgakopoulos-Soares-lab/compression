@@ -1,0 +1,62 @@
+U32 = UInt32LE
+F64 = Float64LE
+
+# CityLots Packed Schema
+# Magic "CITY"
+
+magic: Byte[4]
+num_features: U32
+
+# --- Offsets for String Fields ---
+mapblklot_offsets: U32[num_features + 1]
+blklot_offsets:    U32[num_features + 1]
+block_num_offsets: U32[num_features + 1]
+lot_num_offsets:   U32[num_features + 1]
+from_st_offsets:   U32[num_features + 1]
+to_st_offsets:     U32[num_features + 1]
+street_offsets:    U32[num_features + 1]
+st_type_offsets:   U32[num_features + 1]
+odd_even_offsets:  U32[num_features + 1]
+
+# --- Geometry Structure ---
+# geom_offsets[i] tells where the points for feature i start in the coordinate arrays.
+geom_offsets: U32[num_features + 1]
+
+# --- Data Lengths ---
+mapblklot_len: U32
+blklot_len:    U32
+block_num_len: U32
+lot_num_len:   U32
+from_st_len:   U32
+to_st_len:     U32
+street_len:    U32
+st_type_len:   U32
+odd_even_len:  U32
+total_points:  U32
+
+# --- Padding (to align to 8 bytes) ---
+mapblklot_pad: U32
+blklot_pad:    U32
+block_num_pad: U32
+lot_num_pad:   U32
+from_st_pad:   U32
+to_st_pad:     U32
+street_pad:    U32
+st_type_pad:   U32
+odd_even_pad:  U32
+
+# --- String Data ---
+mapblklot_data: Byte[mapblklot_len + mapblklot_pad]
+blklot_data:    Byte[blklot_len + blklot_pad]
+block_num_data: Byte[block_num_len + block_num_pad]
+lot_num_data:   Byte[lot_num_len + lot_num_pad]
+from_st_data:   Byte[from_st_len + from_st_pad]
+to_st_data:     Byte[to_st_len + to_st_pad]
+street_data:    Byte[street_len + street_pad]
+st_type_data:   Byte[st_type_len + st_type_pad]
+odd_even_data:  Byte[odd_even_len + odd_even_pad]
+
+# --- Coordinate Data ---
+coords_x: F64[total_points]
+coords_y: F64[total_points]
+coords_z: F64[total_points]
