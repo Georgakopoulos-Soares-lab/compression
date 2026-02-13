@@ -43,15 +43,34 @@ COMPRESSOR="$ART_DIR/fasta_packed_train_${TARGET_MIB}MiB_t${THREADS}.compressor"
 
 mkdir -p "$DATA_DIR" "$OUT_DIR" "$ART_DIR" "$TIME_DIR"
 
-# ---- Helpers ----
+time_cmd() {
+  local outfile="$1"
+  shift
+  # macOS /usr/bin/time does not support -f.
+  # We just use -p (POSIX) or default output, and redirect to file.
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    /usr/bin/time -l -p "$@" 2> "$outfile"
+  else
+    /usr/bin/time -f "elapsed_sec=%e maxrss_kb=%M" -o "$outfile" "$@"
+  fi
+}
+
+get_file_size() {
+  local f="$1"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    stat -f%z "$f"
+  else
+    stat -c%s "$f"
+  fi
+}
+
 bytes_sum() {
   # Sums sizes of files passed as arguments.
-  # Works with GNU stat.
   local total=0
   local f sz
   for f in "$@"; do
     [ -f "$f" ] || continue
-    sz="$(stat -c%s "$f")"
+    sz="$(get_file_size "$f")"
     total=$(( total + sz ))
   done
   echo "$total"
@@ -95,7 +114,7 @@ fi
 
 echo "Full FASTA: $FASTA_IN"
 
-orig_bytes="$(stat -c%s "$FASTA_IN")"
+orig_bytes="$(get_file_size "$FASTA_IN")"
 echo "Original FASTA size: $(human_mib "$orig_bytes")"
 
 # ---- 2) Create ~TARGET_MIB training FASTA (record-safe) ----
@@ -118,7 +137,7 @@ echo "Training packed payload size: $(human_mib "$train_bin_bytes")"
 
 # ---- 4) Train compressor (bounded to ~30 min by default) ----
 echo "Training compressor (threads=$THREADS, max_time_secs=$MAX_TIME_SECS): $COMPRESSOR"
-/usr/bin/time -f "elapsed_sec=%e maxrss_kb=%M" -o "$TIME_DIR/train.time" \
+time_cmd "$TIME_DIR/train.time" \
   "$ZLI" train "$TRAIN_CHUNKS" \
     --profile sddl --profile-arg "$SCHEMA" \
     --output "$COMPRESSOR" --force \
@@ -158,7 +177,7 @@ echo "Training-set validation OK"
 # ---- 6) Preprocess full FASTA ----
 rm -rf "$FULL_CHUNKS" && mkdir -p "$FULL_CHUNKS"
 echo "Preprocessing FULL FASTA -> packed chunks: $FULL_CHUNKS (threads=$FULL_PRE_THREADS)"
-/usr/bin/time -f "elapsed_sec=%e maxrss_kb=%M" -o "$TIME_DIR/prep_full.time" \
+time_cmd "$TIME_DIR/prep_full.time" \
   "$PRE" "$FASTA_IN" "$FULL_CHUNKS" "$FULL_PRE_THREADS" fasta_packed
 
 FULL_BINS=("$FULL_CHUNKS"/*.fasta_packed.bin)
@@ -172,7 +191,7 @@ echo "Full packed input total: $(human_mib "$full_in_bytes")"
 
 # ---- 7) Compress full chunks ----
 echo "Compressing FULL chunks with trained compressor (parallel=$THREADS)"
-/usr/bin/time -f "elapsed_sec=%e maxrss_kb=%M" -o "$TIME_DIR/openzl_comp_full.time" \
+time_cmd "$TIME_DIR/openzl_comp_full.time" \
   bash -c 'find "$1" -maxdepth 1 -type f -name "*.fasta_packed.bin" -print0 | \
       xargs -0 -P "$2" -I {} "$3" compress "{}" --compressor "$4" --output "{}.zl" --force' \
     _ "$FULL_CHUNKS" "$COMPRESS_JOBS" "$ZLI" "$COMPRESSOR"
@@ -201,9 +220,9 @@ if have_cmd pigz; then
   mkdir -p "$PIGZ_OUT_DIR"
   PIGZ_OUT="$PIGZ_OUT_DIR/$(basename "$FASTA_IN").gz"
   echo "Running pigz -9 baseline on original FASTA -> $PIGZ_OUT"
-  /usr/bin/time -f "elapsed_sec=%e maxrss_kb=%M" -o "$TIME_DIR/pigz.time" \
+  time_cmd "$TIME_DIR/pigz.time" \
     pigz -9 -p "$THREADS" -c "$FASTA_IN" > "$PIGZ_OUT"
-  pigz_bytes="$(stat -c%s "$PIGZ_OUT")"
+  pigz_bytes="$(get_file_size "$PIGZ_OUT")"
   python3 - <<PY
 orig_b=$orig_bytes
 out_b=$pigz_bytes
@@ -220,7 +239,7 @@ if [ "$VALIDATE_FULL" != "1" ]; then
 else
   echo "Validating FULL chunks (decompress/cmp)"
   FAIL=0
-  /usr/bin/time -f "DECOMP_FULL elapsed=%E cpu=%P maxrss_kb=%M" \
+  time_cmd "$TIME_DIR/full_validate.time" \
     bash -c '
       set -euo pipefail
       ZLI="$1"

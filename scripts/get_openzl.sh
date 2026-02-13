@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -L)"
 OPENZL_DIR="${OPENZL_DIR:-$HERE/openzl}"
 OPENZL_REPO="${OPENZL_REPO:-https://github.com/facebook/openzl}"
 # Pinned to the commit currently used in this workspace.

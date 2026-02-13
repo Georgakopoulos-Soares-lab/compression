@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -L)"
 
 # 1) Ensure OpenZL exists
 "$HERE/scripts/get_openzl.sh"
@@ -15,7 +15,7 @@ cd "$HERE/openzl"
 # Also: user-provided *FLAGS from the environment can override OpenZL's
 # required C++ standard settings. We explicitly unset them for reproducibility.
 env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u LDLIBS \
-  make -j"${JOBS:-$(nproc)}" MOREFLAGS="-pthread"
+  make -j"${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}" MOREFLAGS="-pthread"
 
 if [ ! -x "$HERE/openzl/zli" ]; then
   echo "Error: expected executable not found: $HERE/openzl/zli"
