@@ -33,6 +33,41 @@ xcode-select --install   # Provides clang++, git, make
 sudo apt install build-essential git python3 python3-pip
 ```
 
+## Virtual Environment Setup
+
+Nyx requires **Python 3.8**. We recommend using [pyenv](https://github.com/pyenv/pyenv) to install it and creating a dedicated virtual environment.
+
+### Install Python 3.8 with pyenv
+
+```bash
+# Install pyenv (skip if already installed)
+# macOS
+brew install pyenv
+
+# Linux
+curl https://pyenv.run | bash
+```
+
+```bash
+# Install Python 3.8
+pyenv install 3.8.20
+```
+
+### Create and activate the virtual environment
+
+```bash
+# Create a venv inside the nyx/ directory using the pyenv-managed Python 3.8
+$(pyenv prefix 3.8.20)/bin/python3.8 -m venv nyx/.venv
+
+# Activate it
+source nyx/.venv/bin/activate
+
+# Verify
+python --version   # Should print Python 3.8.x
+```
+
+> **Tip:** You will need to run `source nyx/.venv/bin/activate` each time you open a new terminal session before using `nyx`.
+
 ## Installation
 
 ```bash
