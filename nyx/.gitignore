@@ -1,0 +1,16 @@
+# Compiled OpenZL (cloned during nyx build)
+openzl/
+
+# Compiled binaries
+bin/
+
+# Python packaging
+*.egg-info/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg
+
+# Temp files from nyx runs
+nyx_*/
