@@ -15,7 +15,7 @@ It orchestrates the full pipeline — file type detection, preprocessing, traini
 
 ## Prerequisites
 
-- **Python 3.8+**
+- **Python 3.13+**
 - **C++17 compiler** (g++ or clang++)
 - **Git** (to clone OpenZL source)
 - **Make** (to build OpenZL)
@@ -35,35 +35,29 @@ sudo apt install build-essential git python3 python3-pip
 
 ## Virtual Environment Setup
 
-Nyx requires **Python 3.8**. We recommend using [pyenv](https://github.com/pyenv/pyenv) to install it and creating a dedicated virtual environment.
+Nyx requires **Python 3.13+**. We recommend using [pyenv](https://github.com/pyenv/pyenv) or your system package manager to install it and creating a dedicated virtual environment.
 
-### Install Python 3.8 with pyenv
-
-```bash
-# Install pyenv (skip if already installed)
-# macOS
-brew install pyenv
-
-# Linux
-curl https://pyenv.run | bash
-```
+### Install Python 3.13
 
 ```bash
-# Install Python 3.8
-pyenv install 3.8.20
+# macOS (Homebrew)
+brew install python@3.13
+
+# macOS / Linux (pyenv)
+pyenv install 3.13
 ```
 
 ### Create and activate the virtual environment
 
 ```bash
-# Create a venv inside the nyx/ directory using the pyenv-managed Python 3.8
-$(pyenv prefix 3.8.20)/bin/python3.8 -m venv nyx/.venv
+# Create a venv inside the nyx/ directory
+python3 -m venv nyx/.venv
 
 # Activate it
 source nyx/.venv/bin/activate
 
 # Verify
-python --version   # Should print Python 3.8.x
+python --version   # Should print Python 3.13.x
 ```
 
 > **Tip:** You will need to run `source nyx/.venv/bin/activate` each time you open a new terminal session before using `nyx`.

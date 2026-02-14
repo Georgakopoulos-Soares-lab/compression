@@ -1,5 +1,6 @@
 """nyx build — compile OpenZL and genomic_preprocessor from source."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +45,7 @@ def build_cmd(jobs, verbose):
 
     result = subprocess.run(
         ["bash", str(build_script)],
-        env={**__import__("os").environ, **env},
+        env={**os.environ, **env},
         cwd=str(nyx_root),
     )
 

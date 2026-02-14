@@ -5,7 +5,6 @@ import tempfile
 import time
 from concurrent.futures import as_completed
 from pathlib import Path
-from typing import List, Optional
 
 import click
 from tqdm import tqdm
@@ -50,6 +49,9 @@ from ..utils.paths import find_schema
               default=None, help="Training algorithm (default: greedy).")
 @click.option("--no-clustering", is_flag=True,
               help="Skip clustering during training.")
+@click.option("--ace-successors", is_flag=True,
+              help="Enable ACE successor models during training. "
+                   "May improve ratio on in-distribution data but can hurt generalization.")
 @click.option("--benchmark", is_flag=True,
               help="Run competitor benchmarks (gzip, pigz, zstd) and print comparison table.")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
@@ -57,7 +59,8 @@ from ..utils.paths import find_schema
 @click.option("-f", "--force", is_flag=True, help="Overwrite output file.")
 def compress_cmd(input_file, output_file, mode, sddl, filetype, threads,
                  max_time_secs, compress_jobs, target_train_mib, trainer,
-                 no_clustering, benchmark, keep_temp, verbose, force):
+                 no_clustering, ace_successors, benchmark, keep_temp, verbose,
+                 force):
     """Compress a file using OpenZL.
 
     Supports genomic formats (FASTA, FASTQ, VCF) with schema-aware compression,
@@ -126,6 +129,7 @@ def compress_cmd(input_file, output_file, mode, sddl, filetype, threads,
                 target_train_mib=target_train_mib,
                 trainer=trainer,
                 no_clustering=no_clustering,
+                no_ace_successors=not ace_successors,
                 verbose=verbose,
             )
         elif mode == "default":
@@ -182,16 +186,17 @@ def _compress_trained(
     input_path: Path,
     output_path: Path,
     mode: str,
-    sddl_path: Optional[Path],
-    detected: Optional[str],
+    sddl_path: Path | None,
+    detected: str | None,
     tmpdir: Path,
     threads: int,
     max_time_secs: int,
     compress_jobs: int,
     target_train_mib: int,
-    trainer: Optional[str],
+    trainer: str | None,
     no_clustering: bool,
-    verbose: bool,
+    no_ace_successors: bool = True,
+    verbose: bool = False,
 ) -> None:
     """Pipeline for train_plain and train_custom modes."""
     cfg = SCHEMA_REGISTRY[detected]
@@ -236,6 +241,7 @@ def _compress_trained(
         profile_arg=str(schema_path),
         threads=threads,
         max_time_secs=max_time_secs,
+        no_ace_successors=no_ace_successors,
         trainer=trainer,
         no_clustering=no_clustering,
         verbose=verbose,
@@ -313,7 +319,7 @@ def _compress_default(
 def _compress_inline(
     input_path: Path,
     output_path: Path,
-    detected: Optional[str],
+    detected: str | None,
     genomic: bool,
     tmpdir: Path,
     threads: int,
@@ -384,11 +390,11 @@ def _compress_inline(
 # ---------------------------------------------------------------------------
 
 def _compress_chunks_parallel(
-    chunks: List[Path],
+    chunks: list[Path],
     compressor: Path,
     jobs: int,
     verbose: bool,
-) -> List[Path]:
+) -> list[Path]:
     """Compress multiple chunks in parallel with a tqdm progress bar."""
     compressed = []
 

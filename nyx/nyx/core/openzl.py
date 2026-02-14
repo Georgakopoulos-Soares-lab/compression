@@ -3,7 +3,6 @@
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 import click
 
@@ -14,13 +13,13 @@ class OpenZLError(Exception):
     """Raised when an openzl/zli subprocess fails."""
 
 
-def _build_cmd(args: List[str]) -> List[str]:
+def _build_cmd(args: list[str]) -> list[str]:
     """Build the full zli command list."""
     zli = find_zli()
     return [str(zli)] + args
 
 
-def _run(args: List[str], verbose: bool = False) -> subprocess.CompletedProcess:
+def _run(args: list[str], verbose: bool = False) -> subprocess.CompletedProcess:
     """Run zli with the given arguments."""
     cmd = _build_cmd(args)
 
@@ -48,9 +47,9 @@ def _run(args: List[str], verbose: bool = False) -> subprocess.CompletedProcess:
 def compress(
     input_file: Path,
     output_file: Path,
-    compressor: Optional[Path] = None,
-    profile: Optional[str] = None,
-    profile_arg: Optional[str] = None,
+    compressor: Path | None = None,
+    profile: str | None = None,
+    profile_arg: str | None = None,
     train_inline: bool = False,
     force: bool = True,
     verbose: bool = False,
@@ -94,18 +93,18 @@ def decompress(
 def _build_train_args(
     sample_dir: Path,
     output_file: Path,
-    profile: Optional[str] = None,
-    profile_arg: Optional[str] = None,
-    compressor: Optional[Path] = None,
-    threads: Optional[int] = None,
-    max_time_secs: Optional[int] = None,
+    profile: str | None = None,
+    profile_arg: str | None = None,
+    compressor: Path | None = None,
+    threads: int | None = None,
+    max_time_secs: int | None = None,
     use_all_samples: bool = True,
     no_ace_successors: bool = True,
     no_clustering: bool = False,
-    trainer: Optional[str] = None,
+    trainer: str | None = None,
     force: bool = True,
-    extra_args: Optional[List[str]] = None,
-) -> List[str]:
+    extra_args: list[str] | None = None,
+) -> list[str]:
     """Build the argument list for a train command."""
     args = ["train", str(sample_dir), "--output", str(output_file)]
 
@@ -139,18 +138,18 @@ def _build_train_args(
 def train(
     sample_dir: Path,
     output_file: Path,
-    profile: Optional[str] = None,
-    profile_arg: Optional[str] = None,
-    compressor: Optional[Path] = None,
-    threads: Optional[int] = None,
-    max_time_secs: Optional[int] = None,
+    profile: str | None = None,
+    profile_arg: str | None = None,
+    compressor: Path | None = None,
+    threads: int | None = None,
+    max_time_secs: int | None = None,
     use_all_samples: bool = True,
     no_ace_successors: bool = True,
     no_clustering: bool = False,
-    trainer: Optional[str] = None,
+    trainer: str | None = None,
     force: bool = True,
     verbose: bool = False,
-    extra_args: Optional[List[str]] = None,
+    extra_args: list[str] | None = None,
 ) -> None:
     """Train a compressor on sample data."""
     args = _build_train_args(
@@ -175,18 +174,18 @@ def train(
 def train_async(
     sample_dir: Path,
     output_file: Path,
-    profile: Optional[str] = None,
-    profile_arg: Optional[str] = None,
-    compressor: Optional[Path] = None,
-    threads: Optional[int] = None,
-    max_time_secs: Optional[int] = None,
+    profile: str | None = None,
+    profile_arg: str | None = None,
+    compressor: Path | None = None,
+    threads: int | None = None,
+    max_time_secs: int | None = None,
     use_all_samples: bool = True,
     no_ace_successors: bool = True,
     no_clustering: bool = False,
-    trainer: Optional[str] = None,
+    trainer: str | None = None,
     force: bool = True,
     verbose: bool = False,
-    extra_args: Optional[List[str]] = None,
+    extra_args: list[str] | None = None,
 ) -> subprocess.Popen:
     """Start training as a background process (non-blocking).
 
@@ -223,13 +222,13 @@ def get_train_cmd(
     sample_dir: Path,
     output_file: Path,
     **kwargs,
-) -> List[str]:
+) -> list[str]:
     """Get the full command list for a train invocation (for display)."""
     args = _build_train_args(sample_dir, output_file, **kwargs)
     return _build_cmd(args)
 
 
-def benchmark(input_dir: Path, extra_args: Optional[List[str]] = None,
+def benchmark(input_dir: Path, extra_args: list[str] | None = None,
               verbose: bool = False) -> str:
     """Run benchmark and return stdout."""
     args = ["benchmark", str(input_dir)]
@@ -239,7 +238,7 @@ def benchmark(input_dir: Path, extra_args: Optional[List[str]] = None,
     return result.stdout
 
 
-def inspect(compressor: Path, extra_args: Optional[List[str]] = None,
+def inspect(compressor: Path, extra_args: list[str] | None = None,
             verbose: bool = False) -> str:
     """Inspect a compressor and return stdout (JSON)."""
     args = ["inspect", str(compressor)]
@@ -255,7 +254,7 @@ def list_profiles(verbose: bool = False) -> str:
     return result.stdout
 
 
-def passthrough(args: List[str], verbose: bool = False) -> None:
+def passthrough(args: list[str], verbose: bool = False) -> None:
     """Pass arbitrary arguments directly to zli, streaming output."""
     zli = find_zli()
     cmd = [str(zli)] + args

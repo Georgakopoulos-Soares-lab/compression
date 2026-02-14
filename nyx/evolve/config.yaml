@@ -1,0 +1,121 @@
+# ============================================================================
+# OpenEvolve Configuration — OpenZL Training Hyperparameter Optimization
+# ============================================================================
+#
+# This config drives an evolutionary search over OpenZL training hyperparameters.
+# Each iteration mutates get_training_config() in initial_program.py, trains a
+# compressor, then compresses the FULL genome (~2.7 GB, 16 chunks) to measure
+# real-world compression ratio — exactly matching the nyx compress pipeline.
+#
+# Expected runtime: 4–8 hours for 50 iterations (each takes 2–10 min).
+# Expected LLM cost: ~$0.05 total with gpt-4o-mini.
+# ============================================================================
+
+max_iterations: 50
+checkpoint_interval: 5
+random_seed: 42
+
+# ── LLM Configuration ───────────────────────────────────────────────────────
+# Using OpenAI gpt-4o-mini via their API.
+# Set OPENAI_API_KEY env var (run.sh does this automatically from api_key.txt).
+llm:
+  api_base: "https://api.openai.com/v1"
+  primary_model: "o3"
+  primary_model_weight: 1.0
+  temperature: 0.7
+  max_tokens: 4000
+  timeout: 120
+
+# ── Prompt Configuration ─────────────────────────────────────────────────────
+prompt:
+  system_message: |
+    You are an expert in data compression, specifically Meta's OpenZL framework
+    for schema-aware compression of structured binary data.
+
+    Your task is to optimize the get_training_config() function to maximize the
+    compression ratio when compressing genomic data (FASTA files packed into a
+    columnar binary format called FAV4).
+
+    === HYPERPARAMETER SPACE ===
+
+    trainer (str): The training algorithm that searches the compression plan DAG.
+      - "greedy": Default. Most thorough search — tries every codec combination.
+        Produces the best compression but takes the longest.
+      - "full-split": Fastest. Evaluates codecs independently per stream.
+        Good baseline but may miss cross-stream optimizations.
+      - "bottom-up": Middle ground. Merges similar streams bottom-up.
+        Often close to greedy quality in less time.
+
+    max_time_secs (int, 10–3600): Wall-clock training budget in seconds.
+      More time lets the trainer explore more of the DAG. Diminishing returns
+      past ~600s for small datasets. For 50 MiB training data, 120–300s is
+      usually sufficient. For 200 MiB, 300–900s may help.
+
+    no_ace_successors (bool): Controls ACE (Asymmetric Context Encoding).
+      - True (default): Disables ACE successor models. More robust on unseen data.
+      - False: Enables ACE. Can improve ratio on data similar to training set,
+        but may hurt generalization to unseen genome regions.
+
+    no_clustering (bool): Controls the clustering training phase.
+      - False (default): Clustering groups similar data streams. Usually helps.
+      - True: Skip clustering. Can speed up training but typically hurts ratio.
+
+    target_train_mib (int, one of {50, 100, 200}): Size of training data.
+      Must be exactly 50, 100, or 200 to match pre-prepared datasets.
+      - 50 MiB: Fastest training, but less representative.
+      - 100 MiB: Good balance of speed and representativeness.
+      - 200 MiB: Most representative, but slowest.
+      Key insight: a smaller sample with more training time may beat a larger
+      sample with less time. Explore this trade-off.
+
+    threads (int, 1–64): Number of CPU threads for training. More threads
+      speed up training, but with diminishing returns past the number of
+      physical cores. The evaluation machine has ~10 cores.
+
+    compress_jobs (int, 1–32): Parallel chunk compression jobs. Only affects
+      evaluation speed, not the compression ratio. 4 is a safe default.
+
+    === EVALUATION PIPELINE ===
+
+    The evaluator trains on the small sample (50/100/200 MiB) but then compresses
+    the FULL mouse genome (~2.7 GB, 16 FAV4 chunks). This exactly mirrors the real
+    nyx compress pipeline. Different hyperparameters produce compressors that
+    generalize differently across the varied genomic regions in the full genome.
+
+    === OPTIMIZATION GOAL ===
+
+    Maximize compression_ratio (= original_text_bytes / compressed_bytes).
+    This measures the end-to-end ratio from the raw text FASTA file to the
+    final compressed output, matching exactly what "nyx compress" reports.
+    The default configuration typically achieves 4.0–4.5x on GRCm39.
+    For reference, gzip -1 achieves ~2.8x and zstd -9 achieves ~3.0x.
+    Training time is a secondary concern — it's measured as a feature
+    dimension so we maintain a Pareto frontier of fast-but-decent vs
+    slow-but-great configs.
+
+    === IMPORTANT CONSTRAINTS ===
+
+    - target_train_mib MUST be exactly 50, 100, or 200 (other values will fail).
+    - The function MUST return a dict with all 7 keys listed above.
+    - All values must have the correct types (str, int, bool).
+    - The function body between EVOLVE-BLOCK markers is what you modify.
+
+# ── Database Configuration ───────────────────────────────────────────────────
+database:
+  population_size: 30
+  archive_size: 15
+  num_islands: 3
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.7
+  similarity_threshold: 0.99
+  feature_dimensions: ["training_time", "compression_ratio"]
+
+# ── Evaluator Configuration ──────────────────────────────────────────────────
+evaluator:
+  timeout: 2400  # 40 min max per candidate (training up to 1800s + compress 16 chunks)
+  cascade_thresholds: [0.5]  # Stage 1 must score > 0.5 to proceed to stage 2
+  parallel_evaluations: 1  # Sequential: only 1 zli train at a time (CPU-bound)
+
+# ── Evolution Settings ───────────────────────────────────────────────────────
+diff_based_evolution: true
+max_code_length: 5000

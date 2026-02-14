@@ -1,0 +1,3 @@
+# OpenEvolve — LLM-guided evolutionary hyperparameter search
+# Requires Python >= 3.10
+openevolve>=0.2.26

@@ -12,6 +12,22 @@ __pycache__/
 /nyx/dist/
 /nyx/build/
 
+# API keys (NEVER commit)
+api_key.txt
+
+# OpenEvolve generated data
+evolve_data/
+nyx/evolve/openevolve_output/
+
+# Grid search results
+optimizing_openzl/results/
+
+# Parquet experiment artifacts (generated, large)
+parquet_experiments/data/
+parquet_experiments/extracted/
+parquet_experiments/models/
+parquet_experiments/results/
+
 # OS / editor
 .DS_Store
 *.swp

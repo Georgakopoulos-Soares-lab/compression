@@ -480,7 +480,7 @@ Odd sequences:  Last base in high nibble, low nibble = 0x0
 [project]
 name = "nyx"
 version = "0.1.0"
-requires-python = ">=3.8"
+requires-python = ">=3.13"
 dependencies = ["click>=8.0", "tqdm>=4.60"]
 
 [project.scripts]
@@ -493,7 +493,7 @@ Build backend: setuptools (>= 68.0) + wheel.
 
 | Dependency | Type | Version | Declared In | Purpose |
 |-----------|------|---------|-------------|---------|
-| Python | Runtime | >= 3.8 | `pyproject.toml` | CLI orchestration |
+| Python | Runtime | >= 3.13 | `pyproject.toml` | CLI orchestration |
 | click | Runtime (pip) | >= 8.0 | `pyproject.toml` | CLI framework |
 | tqdm | Runtime (pip) | >= 4.60 | `pyproject.toml` | Progress bars |
 | C++ compiler (g++/clang++) | Build-time | C++17 support | `nyx/scripts/build.sh` | Compiles genomic_preprocessor |
@@ -520,7 +520,7 @@ nyx build                  # Invokes scripts/build.sh:
 
 | Tool | Required? | Install (macOS) | Install (Linux) |
 |------|-----------|----------------|-----------------|
-| Python 3.8+ | Yes | Pre-installed or `pyenv install 3.8.20` | `apt install python3 python3-pip` |
+| Python 3.13+ | Yes | `brew install python@3.13` or `pyenv install 3.13` | `apt install python3 python3-pip` |
 | C++17 compiler | Yes | `xcode-select --install` | `apt install build-essential` |
 | Git | Yes | Included with Xcode CLI tools | `apt install git` |
 | Make | Yes | Included with Xcode CLI tools | `apt install build-essential` |

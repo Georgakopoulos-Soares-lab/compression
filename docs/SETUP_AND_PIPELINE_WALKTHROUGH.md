@@ -20,13 +20,13 @@ This installs the core developer toolchain:
 | `make` | Build automation tool. OpenZL's Makefile describes which source files depend on which. `make -j8` compiles 8 files in parallel. |
 | `git` | Version control. Clones the OpenZL source from GitHub. |
 
-### 1.2 Python 3.8+
+### 1.2 Python 3.13+
 
 The pipeline uses a Python CLI (`nyx`) to orchestrate the build, preprocessing, and compression steps:
 
 | Platform | How to get it |
 |---|---|
-| **macOS** | Pre-installed, or `pyenv install 3.8.20` |
+| **macOS** | `brew install python@3.13` or `pyenv install 3.13` |
 | **Ubuntu/Debian** | `sudo apt install python3 python3-pip python3-venv` |
 
 ### 1.3 Optional Packages (Recommended)
@@ -49,7 +49,7 @@ sudo apt install pigz zstd
 ```bash
 g++ --version            # Apple clang (macOS) or GCC (Linux)
 make --version           # GNU Make
-python3 --version        # 3.8+
+python3 --version        # 3.13+
 git --version            # 2.0+
 ```
 

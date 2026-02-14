@@ -2,7 +2,6 @@
 
 import subprocess
 from pathlib import Path
-from typing import List, Optional
 
 import click
 
@@ -17,9 +16,9 @@ def preprocess(
     input_file: Path,
     output_dir: Path,
     threads: int = 1,
-    filetype: Optional[str] = None,
+    filetype: str | None = None,
     verbose: bool = False,
-) -> List[Path]:
+) -> list[Path]:
     """Run the genomic preprocessor to convert a text file into binary chunks.
 
     Args:

@@ -7,7 +7,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 import click
 from tqdm import tqdm
@@ -72,7 +71,7 @@ def _run_competitor(
     spec: dict,
     input_file: Path,
     output_file: Path,
-) -> Optional[BenchmarkResult]:
+) -> BenchmarkResult | None:
     """Run a single competitor and return the result."""
     binary = spec["binary"]
     if not shutil.which(binary):
@@ -159,7 +158,7 @@ def _run_competitor(
     )
 
 
-def run_benchmarks(input_file: Path, tmpdir: Path) -> List[BenchmarkResult]:
+def run_benchmarks(input_file: Path, tmpdir: Path) -> list[BenchmarkResult]:
     """Run all available competitor benchmarks on the input file."""
     results = []
 
@@ -187,7 +186,7 @@ def run_benchmarks(input_file: Path, tmpdir: Path) -> List[BenchmarkResult]:
 
 def print_benchmark_table(
     nyx_result: BenchmarkResult,
-    competitor_results: List[BenchmarkResult],
+    competitor_results: list[BenchmarkResult],
 ) -> None:
     """Print a formatted comparison table."""
     all_results = [nyx_result] + competitor_results

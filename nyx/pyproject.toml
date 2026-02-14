@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "nyx"
 version = "0.1.0"
 description = "CLI wrapper for OpenZL genomic compression pipelines"
-requires-python = ">=3.8"
+requires-python = ">=3.13"
 dependencies = ["click>=8.0", "tqdm>=4.60"]
 
 [project.scripts]

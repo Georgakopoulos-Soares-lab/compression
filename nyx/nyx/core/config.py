@@ -1,7 +1,6 @@
 """Schema registry and default configuration for Nyx."""
 
 from dataclasses import dataclass
-from typing import Dict, Optional
 import os
 
 
@@ -10,13 +9,13 @@ class FileTypeConfig:
     """Configuration for a supported genomic file type."""
 
     preprocessor_type: str  # Argument passed to genomic_preprocessor
-    sddl: Optional[str]     # SDDL schema filename (in schemas/)
+    sddl: str | None         # SDDL schema filename (in schemas/)
     chunk_extension: str     # Extension of output chunks
 
 
 # Maps detected file types to their preprocessing configuration.
 # To add a new file type: add an entry here + SDDL schema + preprocessor support.
-SCHEMA_REGISTRY: Dict[str, FileTypeConfig] = {
+SCHEMA_REGISTRY: dict[str, FileTypeConfig] = {
     "fasta": FileTypeConfig(
         preprocessor_type="fasta_packed",
         sddl="fasta_packed.sddl",

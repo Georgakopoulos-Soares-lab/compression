@@ -1,7 +1,6 @@
 """Auto-detect genomic file types from file content and extension."""
 
 from pathlib import Path
-from typing import Optional
 
 EXTENSION_MAP = {
     ".fasta": "fasta",
@@ -14,7 +13,7 @@ EXTENSION_MAP = {
 }
 
 
-def detect_by_content(filepath: Path) -> Optional[str]:
+def detect_by_content(filepath: Path) -> str | None:
     """Detect file type by inspecting the first 1KB of content.
 
     Mirrors the logic in biocompress_preprocessor.cpp detect_type().
@@ -43,7 +42,7 @@ def detect_by_content(filepath: Path) -> Optional[str]:
     return None
 
 
-def detect_by_extension(filepath: Path) -> Optional[str]:
+def detect_by_extension(filepath: Path) -> str | None:
     """Detect file type from file extension."""
     # Handle double extensions like .fasta.gz
     suffixes = filepath.suffixes
@@ -54,7 +53,7 @@ def detect_by_extension(filepath: Path) -> Optional[str]:
     return None
 
 
-def detect_filetype(filepath: Path) -> Optional[str]:
+def detect_filetype(filepath: Path) -> str | None:
     """Detect file type using content first, then extension fallback.
 
     Returns one of: 'fasta', 'fastq', 'vcf', or None for unknown.
@@ -65,6 +64,6 @@ def detect_filetype(filepath: Path) -> Optional[str]:
     return detect_by_extension(filepath)
 
 
-def is_genomic(filetype: Optional[str]) -> bool:
+def is_genomic(filetype: str | None) -> bool:
     """Check if a file type is a supported genomic format."""
     return filetype in ("fasta", "fastq", "vcf")

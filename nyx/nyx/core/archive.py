@@ -4,7 +4,7 @@ import json
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 NYX_ARCHIVE_VERSION = 1
@@ -12,9 +12,9 @@ NYX_ARCHIVE_VERSION = 1
 
 def create_archive(
     output_path: Path,
-    manifest: Dict[str, Any],
-    chunk_files: List[Path],
-    compressor_path: Optional[Path] = None,
+    manifest: dict[str, Any],
+    chunk_files: list[Path],
+    compressor_path: Path | None = None,
 ) -> Path:
     """Create a .nyx archive bundling compressed chunks and metadata.
 
@@ -56,7 +56,7 @@ def create_archive(
     return output_path
 
 
-def extract_archive(archive_path: Path, extract_dir: Path) -> Dict[str, Any]:
+def extract_archive(archive_path: Path, extract_dir: Path) -> dict[str, Any]:
     """Extract a .nyx archive and return the manifest.
 
     Args:
@@ -78,7 +78,7 @@ def extract_archive(archive_path: Path, extract_dir: Path) -> Dict[str, Any]:
                 raise ValueError(
                     f"Archive contains unsafe path: {member.name}"
                 )
-        tar.extractall(extract_dir)
+        tar.extractall(extract_dir, filter="data")
 
     manifest_path = extract_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -90,7 +90,7 @@ def extract_archive(archive_path: Path, extract_dir: Path) -> Dict[str, Any]:
     return manifest
 
 
-def get_chunks_from_extract(extract_dir: Path) -> List[Path]:
+def get_chunks_from_extract(extract_dir: Path) -> list[Path]:
     """Get sorted list of chunk files from an extracted archive."""
     chunks_dir = extract_dir / "chunks"
     if not chunks_dir.is_dir():
@@ -98,7 +98,7 @@ def get_chunks_from_extract(extract_dir: Path) -> List[Path]:
     return sorted(chunks_dir.iterdir())
 
 
-def get_compressor_from_extract(extract_dir: Path) -> Optional[Path]:
+def get_compressor_from_extract(extract_dir: Path) -> Path | None:
     """Get the compressor file from an extracted archive, if present."""
     compressor = extract_dir / "compressor.model"
     if compressor.is_file():

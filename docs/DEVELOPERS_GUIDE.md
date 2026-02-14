@@ -326,7 +326,7 @@ OpenZL is pinned to commit `e40fe9f314283047147d573d113fa7d17eabf7ac` for reprod
 | C++ Compiler (g++ or clang++) | GCC 9+ / Clang 13+ | Builds OpenZL and the preprocessor (C++17 required) |
 | GNU Make | 3.81+ | Builds OpenZL from source |
 | Git | 2.0+ | Clones the OpenZL repository |
-| Python 3 | 3.8+ | Runs the CLI wrapper |
+| Python 3 | 3.13+ | Runs the CLI wrapper |
 
 **Platform support:** Linux (primary) and macOS are both fully supported. The preprocessor uses POSIX `mmap`, which works on both.
 
