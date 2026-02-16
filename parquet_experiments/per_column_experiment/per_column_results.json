@@ -1,0 +1,540 @@
+{
+  "numeric_heavy": {
+    "columns": [
+      {
+        "name": "timestamp",
+        "profile": "le-i64",
+        "raw_bytes": 24000000,
+        "zl_bytes": 3522613,
+        "ratio": 6.813,
+        "time_secs": 203.3
+      },
+      {
+        "name": "device_id",
+        "profile": "le-i32",
+        "raw_bytes": 12000000,
+        "zl_bytes": 3750035,
+        "ratio": 3.2,
+        "time_secs": 99.0
+      },
+      {
+        "name": "temperature",
+        "profile": "le-i32",
+        "raw_bytes": 12000000,
+        "zl_bytes": 8492492,
+        "ratio": 1.413,
+        "time_secs": 166.7
+      },
+      {
+        "name": "humidity",
+        "profile": "le-i32",
+        "raw_bytes": 12000000,
+        "zl_bytes": 8167195,
+        "ratio": 1.469,
+        "time_secs": 120.7
+      },
+      {
+        "name": "pressure",
+        "profile": "le-i32",
+        "raw_bytes": 12000000,
+        "zl_bytes": 4117516,
+        "ratio": 2.914,
+        "time_secs": 243.4
+      },
+      {
+        "name": "battery_voltage",
+        "profile": "le-i32",
+        "raw_bytes": 12000000,
+        "zl_bytes": 7085773,
+        "ratio": 1.694,
+        "time_secs": 145.2
+      },
+      {
+        "name": "status_code",
+        "profile": "le-i16",
+        "raw_bytes": 6000000,
+        "zl_bytes": 254723,
+        "ratio": 23.555,
+        "time_secs": 44.1
+      }
+    ],
+    "total_raw": 90000000,
+    "total_compressed": 35390347
+  },
+  "ml_features": {
+    "columns": [
+      {
+        "name": "entity_id",
+        "profile": "le-i64",
+        "raw_bytes": 4000000,
+        "zl_bytes": 79,
+        "ratio": 50632.911,
+        "time_secs": 23.2
+      },
+      {
+        "name": "feature_01",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 705403,
+        "ratio": 2.835,
+        "time_secs": 45.7
+      },
+      {
+        "name": "feature_02",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 549490,
+        "ratio": 3.64,
+        "time_secs": 35.4
+      },
+      {
+        "name": "feature_03",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 651629,
+        "ratio": 3.069,
+        "time_secs": 40.6
+      },
+      {
+        "name": "feature_04",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 658702,
+        "ratio": 3.036,
+        "time_secs": 48.7
+      },
+      {
+        "name": "feature_05",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 511250,
+        "ratio": 3.912,
+        "time_secs": 35.0
+      },
+      {
+        "name": "feature_06",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 754913,
+        "ratio": 2.649,
+        "time_secs": 36.2
+      },
+      {
+        "name": "feature_07",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 819144,
+        "ratio": 2.442,
+        "time_secs": 32.2
+      },
+      {
+        "name": "feature_08",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 599631,
+        "ratio": 3.335,
+        "time_secs": 35.6
+      },
+      {
+        "name": "feature_09",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 784715,
+        "ratio": 2.549,
+        "time_secs": 39.8
+      },
+      {
+        "name": "feature_10",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 728935,
+        "ratio": 2.744,
+        "time_secs": 45.9
+      },
+      {
+        "name": "feature_11",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1296288,
+        "ratio": 1.543,
+        "time_secs": 34.9
+      },
+      {
+        "name": "feature_12",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1569334,
+        "ratio": 1.274,
+        "time_secs": 28.2
+      },
+      {
+        "name": "feature_13",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1400929,
+        "ratio": 1.428,
+        "time_secs": 30.3
+      },
+      {
+        "name": "feature_14",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1529806,
+        "ratio": 1.307,
+        "time_secs": 36.2
+      },
+      {
+        "name": "feature_15",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1427707,
+        "ratio": 1.401,
+        "time_secs": 39.5
+      },
+      {
+        "name": "feature_16",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1622292,
+        "ratio": 1.233,
+        "time_secs": 28.1
+      },
+      {
+        "name": "feature_17",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1593842,
+        "ratio": 1.255,
+        "time_secs": 25.4
+      },
+      {
+        "name": "feature_18",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1614230,
+        "ratio": 1.239,
+        "time_secs": 28.9
+      },
+      {
+        "name": "feature_19",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1436777,
+        "ratio": 1.392,
+        "time_secs": 36.0
+      },
+      {
+        "name": "feature_20",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 1480506,
+        "ratio": 1.351,
+        "time_secs": 24.8
+      },
+      {
+        "name": "feature_21",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 142420,
+        "ratio": 14.043,
+        "time_secs": 20.5
+      },
+      {
+        "name": "feature_22",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 254266,
+        "ratio": 7.866,
+        "time_secs": 25.0
+      },
+      {
+        "name": "feature_23",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 226812,
+        "ratio": 8.818,
+        "time_secs": 20.2
+      },
+      {
+        "name": "feature_24",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 203189,
+        "ratio": 9.843,
+        "time_secs": 30.0
+      },
+      {
+        "name": "feature_25",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 259131,
+        "ratio": 7.718,
+        "time_secs": 27.9
+      },
+      {
+        "name": "feature_26",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 311801,
+        "ratio": 6.414,
+        "time_secs": 33.6
+      },
+      {
+        "name": "feature_27",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 369163,
+        "ratio": 5.418,
+        "time_secs": 35.8
+      },
+      {
+        "name": "feature_28",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 286501,
+        "ratio": 6.981,
+        "time_secs": 32.5
+      },
+      {
+        "name": "feature_29",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 147104,
+        "ratio": 13.596,
+        "time_secs": 23.1
+      },
+      {
+        "name": "feature_30",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 171172,
+        "ratio": 11.684,
+        "time_secs": 20.8
+      },
+      {
+        "name": "feature_31",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 312667,
+        "ratio": 6.397,
+        "time_secs": 17.6
+      },
+      {
+        "name": "feature_32",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 233603,
+        "ratio": 8.562,
+        "time_secs": 13.7
+      },
+      {
+        "name": "feature_33",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 352218,
+        "ratio": 5.678,
+        "time_secs": 19.4
+      },
+      {
+        "name": "feature_34",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 338899,
+        "ratio": 5.901,
+        "time_secs": 19.0
+      },
+      {
+        "name": "feature_35",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 262809,
+        "ratio": 7.61,
+        "time_secs": 16.4
+      },
+      {
+        "name": "feature_36",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 292107,
+        "ratio": 6.847,
+        "time_secs": 17.1
+      },
+      {
+        "name": "feature_37",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 250102,
+        "ratio": 7.997,
+        "time_secs": 14.8
+      },
+      {
+        "name": "feature_38",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 348552,
+        "ratio": 5.738,
+        "time_secs": 18.1
+      },
+      {
+        "name": "feature_39",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 336553,
+        "ratio": 5.943,
+        "time_secs": 19.6
+      },
+      {
+        "name": "feature_40",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 354828,
+        "ratio": 5.637,
+        "time_secs": 19.4
+      },
+      {
+        "name": "feature_41",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 710022,
+        "ratio": 2.817,
+        "time_secs": 30.4
+      },
+      {
+        "name": "feature_42",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 592462,
+        "ratio": 3.376,
+        "time_secs": 42.9
+      },
+      {
+        "name": "feature_43",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 655135,
+        "ratio": 3.053,
+        "time_secs": 42.8
+      },
+      {
+        "name": "feature_44",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 664698,
+        "ratio": 3.009,
+        "time_secs": 38.5
+      },
+      {
+        "name": "feature_45",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 549803,
+        "ratio": 3.638,
+        "time_secs": 54.2
+      },
+      {
+        "name": "feature_46",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 783359,
+        "ratio": 2.553,
+        "time_secs": 38.0
+      },
+      {
+        "name": "feature_47",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 827055,
+        "ratio": 2.418,
+        "time_secs": 35.9
+      },
+      {
+        "name": "feature_48",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 664373,
+        "ratio": 3.01,
+        "time_secs": 35.7
+      },
+      {
+        "name": "feature_49",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 849534,
+        "ratio": 2.354,
+        "time_secs": 31.9
+      },
+      {
+        "name": "feature_50",
+        "profile": "le-i32",
+        "raw_bytes": 2000000,
+        "zl_bytes": 725946,
+        "ratio": 2.755,
+        "time_secs": 42.0
+      }
+    ],
+    "total_raw": 104000000,
+    "total_compressed": 34211886
+  },
+  "mixed_type": {
+    "columns": [
+      {
+        "name": "order_id",
+        "profile": "le-i64",
+        "raw_bytes": 16000000,
+        "zl_bytes": 84,
+        "ratio": 190476.19,
+        "time_secs": 92.5
+      },
+      {
+        "name": "customer_id",
+        "profile": "le-i32",
+        "raw_bytes": 8000000,
+        "zl_bytes": 3614411,
+        "ratio": 2.213,
+        "time_secs": 102.6
+      },
+      {
+        "name": "order_date",
+        "profile": "le-i64",
+        "raw_bytes": 16000000,
+        "zl_bytes": 11434375,
+        "ratio": 1.399,
+        "time_secs": 137.4
+      },
+      {
+        "name": "quantity",
+        "profile": "le-i16",
+        "raw_bytes": 4000000,
+        "zl_bytes": 620299,
+        "ratio": 6.449,
+        "time_secs": 34.2
+      },
+      {
+        "name": "unit_price",
+        "profile": "le-i64",
+        "raw_bytes": 16000000,
+        "zl_bytes": 1864491,
+        "ratio": 8.581,
+        "time_secs": 125.9
+      },
+      {
+        "name": "total_amount",
+        "profile": "le-i64",
+        "raw_bytes": 16000000,
+        "zl_bytes": 3615484,
+        "ratio": 4.425,
+        "time_secs": 213.9
+      },
+      {
+        "name": "is_returned",
+        "profile": "serial",
+        "raw_bytes": 2000000,
+        "zl_bytes": 72370,
+        "ratio": 27.636,
+        "time_secs": 12.8
+      }
+    ],
+    "total_raw": 78000000,
+    "total_compressed": 21221514
+  }
+}

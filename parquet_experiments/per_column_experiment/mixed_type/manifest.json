@@ -1,0 +1,74 @@
+{
+  "dataset": "mixed_type",
+  "num_rows": 2000000,
+  "columns": [
+    {
+      "name": "order_id",
+      "type": "int64",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 16000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/order_id.bin"
+    },
+    {
+      "name": "customer_id",
+      "type": "int32",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 8000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/customer_id.bin"
+    },
+    {
+      "name": "order_date",
+      "type": "timestamp[us]",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 16000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/order_date.bin"
+    },
+    {
+      "name": "product_name",
+      "type": "string",
+      "skipped": true,
+      "reason": "no LE profile for strings"
+    },
+    {
+      "name": "quantity",
+      "type": "int16",
+      "profile": "le-i16",
+      "width": 2,
+      "raw_bytes": 4000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/quantity.bin"
+    },
+    {
+      "name": "unit_price",
+      "type": "double",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 16000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/unit_price.bin"
+    },
+    {
+      "name": "total_amount",
+      "type": "double",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 16000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/total_amount.bin"
+    },
+    {
+      "name": "is_returned",
+      "type": "bool",
+      "profile": "serial",
+      "width": 1,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/mixed_type/is_returned.bin"
+    },
+    {
+      "name": "shipping_country",
+      "type": "string",
+      "skipped": true,
+      "reason": "no LE profile for strings"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "experiment": "string_column_compression",
+  "approach": "dictionary_encoding_plus_openzl_le_profile",
+  "columns": {
+    "product_name": {
+      "num_values": 2000000,
+      "num_unique": 500,
+      "avg_string_length": 19.3,
+      "raw_string_bytes": 46575616,
+      "dict_index_type": "uint16",
+      "dict_index_profile": "le-i16",
+      "dict_index_raw_bytes": 4000000,
+      "dict_blob_bytes": 11264,
+      "openzl_compressed_indices": 2125494,
+      "openzl_total": 2136758,
+      "parquet_dict_zstd": 2268544,
+      "savings_vs_parquet_zstd_pct": 5.8
+    },
+    "shipping_country": {
+      "num_values": 2000000,
+      "num_unique": 30,
+      "avg_string_length": 2.0,
+      "raw_string_bytes": 12000000,
+      "dict_index_type": "uint8",
+      "dict_index_profile": "serial",
+      "dict_index_raw_bytes": 2000000,
+      "dict_blob_bytes": 190,
+      "openzl_compressed_indices": 961448,
+      "openzl_total": 961638,
+      "parquet_dict_zstd": 1156038,
+      "savings_vs_parquet_zstd_pct": 16.8
+    }
+  },
+  "combined": {
+    "openzl_total": 3098396,
+    "parquet_zstd_total": 3424582,
+    "savings_pct": 9.5
+  }
+}

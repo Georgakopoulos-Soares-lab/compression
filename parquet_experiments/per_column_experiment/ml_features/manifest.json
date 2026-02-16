@@ -1,0 +1,414 @@
+{
+  "dataset": "ml_features",
+  "num_rows": 500000,
+  "columns": [
+    {
+      "name": "entity_id",
+      "type": "int64",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 4000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/entity_id.bin"
+    },
+    {
+      "name": "feature_01",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_01.bin"
+    },
+    {
+      "name": "feature_02",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_02.bin"
+    },
+    {
+      "name": "feature_03",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_03.bin"
+    },
+    {
+      "name": "feature_04",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_04.bin"
+    },
+    {
+      "name": "feature_05",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_05.bin"
+    },
+    {
+      "name": "feature_06",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_06.bin"
+    },
+    {
+      "name": "feature_07",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_07.bin"
+    },
+    {
+      "name": "feature_08",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_08.bin"
+    },
+    {
+      "name": "feature_09",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_09.bin"
+    },
+    {
+      "name": "feature_10",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_10.bin"
+    },
+    {
+      "name": "feature_11",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_11.bin"
+    },
+    {
+      "name": "feature_12",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_12.bin"
+    },
+    {
+      "name": "feature_13",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_13.bin"
+    },
+    {
+      "name": "feature_14",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_14.bin"
+    },
+    {
+      "name": "feature_15",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_15.bin"
+    },
+    {
+      "name": "feature_16",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_16.bin"
+    },
+    {
+      "name": "feature_17",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_17.bin"
+    },
+    {
+      "name": "feature_18",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_18.bin"
+    },
+    {
+      "name": "feature_19",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_19.bin"
+    },
+    {
+      "name": "feature_20",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_20.bin"
+    },
+    {
+      "name": "feature_21",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_21.bin"
+    },
+    {
+      "name": "feature_22",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_22.bin"
+    },
+    {
+      "name": "feature_23",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_23.bin"
+    },
+    {
+      "name": "feature_24",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_24.bin"
+    },
+    {
+      "name": "feature_25",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_25.bin"
+    },
+    {
+      "name": "feature_26",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_26.bin"
+    },
+    {
+      "name": "feature_27",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_27.bin"
+    },
+    {
+      "name": "feature_28",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_28.bin"
+    },
+    {
+      "name": "feature_29",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_29.bin"
+    },
+    {
+      "name": "feature_30",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_30.bin"
+    },
+    {
+      "name": "feature_31",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_31.bin"
+    },
+    {
+      "name": "feature_32",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_32.bin"
+    },
+    {
+      "name": "feature_33",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_33.bin"
+    },
+    {
+      "name": "feature_34",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_34.bin"
+    },
+    {
+      "name": "feature_35",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_35.bin"
+    },
+    {
+      "name": "feature_36",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_36.bin"
+    },
+    {
+      "name": "feature_37",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_37.bin"
+    },
+    {
+      "name": "feature_38",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_38.bin"
+    },
+    {
+      "name": "feature_39",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_39.bin"
+    },
+    {
+      "name": "feature_40",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_40.bin"
+    },
+    {
+      "name": "feature_41",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_41.bin"
+    },
+    {
+      "name": "feature_42",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_42.bin"
+    },
+    {
+      "name": "feature_43",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_43.bin"
+    },
+    {
+      "name": "feature_44",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_44.bin"
+    },
+    {
+      "name": "feature_45",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_45.bin"
+    },
+    {
+      "name": "feature_46",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_46.bin"
+    },
+    {
+      "name": "feature_47",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_47.bin"
+    },
+    {
+      "name": "feature_48",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_48.bin"
+    },
+    {
+      "name": "feature_49",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_49.bin"
+    },
+    {
+      "name": "feature_50",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 2000000,
+      "bin_file": "parquet_experiments/per_column_experiment/ml_features/feature_50.bin"
+    }
+  ]
+}

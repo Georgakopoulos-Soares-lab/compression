@@ -1,0 +1,28 @@
+{
+  "column": "shipping_country",
+  "num_values": 2000000,
+  "num_unique": 30,
+  "format_a": {
+    "file": "parquet_experiments/per_column_experiment/mixed_type/shipping_country_bytearray.bin",
+    "size": 12000000,
+    "profile": "serial"
+  },
+  "format_b": {
+    "lengths_file": "parquet_experiments/per_column_experiment/mixed_type/shipping_country_lengths.bin",
+    "lengths_size": 8000000,
+    "lengths_profile": "le-i32",
+    "data_file": "parquet_experiments/per_column_experiment/mixed_type/shipping_country_data.bin",
+    "data_size": 4000000,
+    "data_profile": "serial"
+  },
+  "format_c": {
+    "indices_file": "parquet_experiments/per_column_experiment/mixed_type/shipping_country_dict_indices.bin",
+    "indices_size": 2000000,
+    "indices_profile": "serial",
+    "indices_dtype": "uint8",
+    "indices_width": 1,
+    "dict_file": "parquet_experiments/per_column_experiment/mixed_type/shipping_country_dict_values.bin",
+    "dict_size": 180,
+    "dict_profile": "serial"
+  }
+}

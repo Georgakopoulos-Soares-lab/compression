@@ -1,0 +1,62 @@
+{
+  "dataset": "numeric_heavy",
+  "num_rows": 3000000,
+  "columns": [
+    {
+      "name": "timestamp",
+      "type": "int64",
+      "profile": "le-i64",
+      "width": 8,
+      "raw_bytes": 24000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/timestamp.bin"
+    },
+    {
+      "name": "device_id",
+      "type": "int32",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 12000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/device_id.bin"
+    },
+    {
+      "name": "temperature",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 12000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/temperature.bin"
+    },
+    {
+      "name": "humidity",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 12000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/humidity.bin"
+    },
+    {
+      "name": "pressure",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 12000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/pressure.bin"
+    },
+    {
+      "name": "battery_voltage",
+      "type": "float",
+      "profile": "le-i32",
+      "width": 4,
+      "raw_bytes": 12000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/battery_voltage.bin"
+    },
+    {
+      "name": "status_code",
+      "type": "int16",
+      "profile": "le-i16",
+      "width": 2,
+      "raw_bytes": 6000000,
+      "bin_file": "parquet_experiments/per_column_experiment/numeric_heavy/status_code.bin"
+    }
+  ]
+}

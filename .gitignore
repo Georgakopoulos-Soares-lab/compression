@@ -2,7 +2,7 @@
 /data
 
 # Nyx build artifacts (compiled inside nyx/)
-/nyx/openzl/
+
 /nyx/bin/
 
 # Python packaging
