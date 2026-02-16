@@ -17,6 +17,9 @@ echo "Cleaning generated files for $BASENAME in $EXP_DIR..."
 rm -rf "$EXP_DIR/chunks_train"
 rm -rf "$EXP_DIR/chunks_full"
 rm -rf "$EXP_DIR/timing"
+rm -rf "$EXP_DIR/timing_compare"
+rm -rf "$EXP_DIR/timing_benchmark"
+rm -rf "$EXP_DIR/timing_csv"
 
 # 2. Remove Generated Files
 rm -f "$EXP_DIR/${BASENAME}_schema.sddl"
@@ -24,5 +27,6 @@ rm -f "$EXP_DIR/${BASENAME}_mapping.json"
 rm -f "$EXP_DIR/${BASENAME}_train.json"
 rm -f "$EXP_DIR/${BASENAME}.compressor"
 rm -f "$EXP_DIR/${BASENAME}.json.gz"
+rm -f "$EXP_DIR/${BASENAME}.json.zst"
 
 echo "Done. Kept original file: $INPUT_JSON"
