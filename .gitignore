@@ -1,5 +1,6 @@
 # Downloaded genome data
 /data
+/bench_out
 
 # Nyx build artifacts (compiled inside nyx/)
 /nyx/openzl/

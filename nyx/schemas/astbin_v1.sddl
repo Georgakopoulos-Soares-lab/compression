@@ -1,0 +1,18 @@
+U32 = UInt32LE
+magic           : Byte[4]
+version         : Byte[2]
+reserved        : Byte[2]
+n_tokens        : U32
+n_strings       : U32
+n_ints          : U32
+n_floats        : U32
+n_bools         : U32
+string_blob_len : U32
+tokens          : Byte[n_tokens]
+args            : U32[n_tokens]
+string_offsets  : U32[n_strings + 1]
+string_blob     : Byte[string_blob_len]
+ints            : Byte[n_ints * 8]
+floats          : Byte[n_floats * 8]
+bools           : Byte[n_bools]
+: Byte[_rem]

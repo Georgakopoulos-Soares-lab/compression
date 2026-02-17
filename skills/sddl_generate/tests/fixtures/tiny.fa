@@ -1,0 +1,10 @@
+>seq1 test sequence one
+ACGTACGTACGTACGTACGT
+NNNNACGTACGT
+>seq2 test sequence two
+TTTTTTTTTTTTTTTTT
+>seq3 test sequence three with N bases
+ACGTNNNNACGTACGTACGTACGTACGT
+ACGTACGTACGTACGT
+>seq4 short
+ACG
