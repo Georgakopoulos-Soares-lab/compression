@@ -10,8 +10,6 @@ from .commands.benchmark import benchmark_cmd
 from .commands.inspect_cmd import inspect_cmd
 from .commands.list_profiles import list_profiles_cmd
 from .commands.build import build_cmd
-from .commands.json_benchmark import json_benchmark_cmd
-from .commands.openalex_benchmark import openalex_benchmark_cmd
 
 
 @click.group()
@@ -53,8 +51,6 @@ main.add_command(benchmark_cmd)
 main.add_command(inspect_cmd)
 main.add_command(list_profiles_cmd)
 main.add_command(build_cmd)
-main.add_command(json_benchmark_cmd)
-main.add_command(openalex_benchmark_cmd)
 
 
 if __name__ == "__main__":
