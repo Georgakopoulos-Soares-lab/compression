@@ -1,0 +1,20 @@
+# FASTQ binary format v4 (FQV4) - from biocompress_preprocessor.cpp
+# Header dedup (common prefix + suffixes) + 4-bit packed bases + raw qualities
+# Magic "FQV4"
+
+U32 = UInt32LE
+U16 = UInt16LE
+
+magic         : Byte[4]
+num_records   : U32
+prefix_len    : U16
+common_prefix : Byte[prefix_len]
+len_bytes     : U16[num_records]   # read length (bases) per record
+
+suffix_total  : U32   # padded size (multiple of 4)
+seq_total     : U32   # padded size (multiple of 4)
+qual_total    : U32   # padded size (multiple of 4)
+
+suffixes      : Byte[suffix_total]   # null-terminated header suffixes
+sequences     : Byte[seq_total]     # 4-bit packed, 2 bases/byte
+qualities     : Byte[qual_total]    # raw quality bytes
