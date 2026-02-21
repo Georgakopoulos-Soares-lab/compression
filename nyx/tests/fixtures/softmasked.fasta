@@ -1,0 +1,10 @@
+>chr1 repeat-masked regions
+ACGTACGTacgtacgtacgtacgtACGTACGT
+acgtacgtacgtacgtacgtacgtacgtacgt
+ACGTACGTACGTACGTacgtACGT
+>chr2 mostly lowercase
+acgtacgtacgtacgtacgtacgtacgtacgt
+acgtacgtacgtacgtacgtacgtacgtacgt
+acgtACGTacgt
+>chr3 mixed case with N
+ACGTnnnnACGTacgtNNNNacgt

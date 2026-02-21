@@ -1,0 +1,6 @@
+@wrapped_seq sequence and quality span multiple lines
+ACGTACGTAC
+GTACGTACGT
++
+IIIIIIIIII
+FFFFFFFFFF

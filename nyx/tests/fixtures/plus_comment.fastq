@@ -1,0 +1,8 @@
+@read_with_plus_comment description here
+ACGTACGT
++read_with_plus_comment description here
+IIIIIIII
+@read_empty_plus
+TGCATGCA
++
+FFFFFFFF

@@ -90,6 +90,68 @@ def find_schema(name: str) -> Path:
     raise FileNotFoundError(f"Schema not found: {name}")
 
 
+def find_fasta_codec() -> Path:
+    """Locate the fasta_codec binary.
+
+    Search order:
+      1. NYX_FASTA_CODEC environment variable
+      2. <nyx_root>/bin/fasta_codec  (built by 'nyx build')
+      3. ``fasta_codec`` on PATH
+    """
+    env = os.environ.get("NYX_FASTA_CODEC")
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+        raise FileNotFoundError(
+            f"NYX_FASTA_CODEC points to missing file: {env}"
+        )
+
+    local = _nyx_root() / "bin" / "fasta_codec"
+    if local.is_file():
+        return local
+
+    on_path = shutil.which("fasta_codec")
+    if on_path:
+        return Path(on_path)
+
+    raise FileNotFoundError(
+        f"Cannot find fasta_codec binary. {_BUILD_HINT} "
+        f"Or set NYX_FASTA_CODEC environment variable."
+    )
+
+
+def find_fastq_codec() -> Path:
+    """Locate the fastq_codec binary.
+
+    Search order:
+      1. NYX_FASTQ_CODEC environment variable
+      2. <nyx_root>/bin/fastq_codec  (built by 'nyx build')
+      3. ``fastq_codec`` on PATH
+    """
+    env = os.environ.get("NYX_FASTQ_CODEC")
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+        raise FileNotFoundError(
+            f"NYX_FASTQ_CODEC points to missing file: {env}"
+        )
+
+    local = _nyx_root() / "bin" / "fastq_codec"
+    if local.is_file():
+        return local
+
+    on_path = shutil.which("fastq_codec")
+    if on_path:
+        return Path(on_path)
+
+    raise FileNotFoundError(
+        f"Cannot find fastq_codec binary. {_BUILD_HINT} "
+        f"Or set NYX_FASTQ_CODEC environment variable."
+    )
+
+
 def find_make_train_sample() -> Path:
     """Locate the make_train_sample.py script."""
     p = _nyx_root() / "scripts" / "make_train_sample.py"

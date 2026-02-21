@@ -1,0 +1,6 @@
+>seq1 with gap characters
+ACGT--ACGT..ACGT
+>seq2 mixed gaps and IUPAC
+ACG-T.R-Y.S-W
+>seq3 gap run
+----ACGT----ACGT----

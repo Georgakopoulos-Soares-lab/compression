@@ -10,6 +10,10 @@ from .commands.benchmark import benchmark_cmd
 from .commands.inspect_cmd import inspect_cmd
 from .commands.list_profiles import list_profiles_cmd
 from .commands.build import build_cmd
+from .commands.compress_lossless import compress_lossless_cmd
+from .commands.decompress_lossless import decompress_lossless_cmd
+from .commands.compress_lossless_fastq import compress_lossless_fastq_cmd
+from .commands.decompress_lossless_fastq import decompress_lossless_fastq_cmd
 
 
 @click.group()
@@ -51,6 +55,10 @@ main.add_command(benchmark_cmd)
 main.add_command(inspect_cmd)
 main.add_command(list_profiles_cmd)
 main.add_command(build_cmd)
+main.add_command(compress_lossless_cmd)
+main.add_command(decompress_lossless_cmd)
+main.add_command(compress_lossless_fastq_cmd)
+main.add_command(decompress_lossless_fastq_cmd)
 
 
 if __name__ == "__main__":

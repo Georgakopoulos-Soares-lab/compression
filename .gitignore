@@ -5,6 +5,7 @@
 # Nyx build artifacts (compiled inside nyx/)
 /nyx/openzl/
 /nyx/bin/
+/nyx/models2/
 
 # Python packaging
 *.egg-info/

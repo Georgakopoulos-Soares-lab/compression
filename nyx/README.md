@@ -88,10 +88,13 @@ Both `nyx/openzl/` and `nyx/bin/` are gitignored — only source code is tracked
 ## Quick Start
 
 ```bash
-# Compress a FASTA file (auto-detects type, uses schema-aware pipeline)
-nyx compress genome.fasta -o genome.nyx
+# Lossless compression (auto-detects FASTA/FASTQ, byte-exact reconstruction)
+nyx compress-lossless genome.fasta
+nyx compress-lossless reads.fastq --threads 4
+nyx decompress-lossless genome.fasta.zlfasta
 
-# Decompress
+# Schema-aware compression (training-based, higher ratio but lossy reconstruction)
+nyx compress genome.fasta -o genome.nyx
 nyx decompress genome.nyx -o output/
 
 # Check version
@@ -99,6 +102,68 @@ nyx --version
 ```
 
 ## Commands
+
+### `nyx compress-lossless`
+
+**Unified lossless compression** for FASTA and FASTQ files with byte-exact reconstruction. Auto-detects the input format (or specify with `--type`).
+
+```
+nyx compress-lossless <file> [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output PATH` | Output path (default: `<input>.zlfasta` or `.zlfastq`) |
+| `-t, --type TYPE` | Input type: `auto`, `fasta`, or `fastq` (default: auto) |
+| `--threads N` | Number of parallel encoding threads (default: 1) |
+| `--train` | Train per-stream compressors (one-time, improves ratio) |
+| `--models-dir PATH` | Directory for trained compressor models |
+| `--no-trained` | Ignore trained compressors, use generic serial profile |
+| `-v, --verbose` | Print subprocess commands |
+| `-f, --force` | Overwrite existing output |
+
+**Examples:**
+
+```bash
+# Auto-detect FASTA, single-threaded
+nyx compress-lossless genome.fasta
+
+# FASTQ with 4 encoding threads
+nyx compress-lossless reads.fastq --threads 4
+
+# Train per-stream compressors for better ratio (first time only)
+nyx compress-lossless genome.fasta --train
+
+# Explicit type override
+nyx compress-lossless data.fa --type fasta
+```
+
+**How it works:** The input is split into typed binary streams (N-mask, 2-bit bases, ACGT-mask, exceptions, case, wrapping, quality) by a C++ codec, then each stream is independently compressed with OpenZL and bundled into a `.zlfasta` or `.zlfastq` container.
+
+### `nyx decompress-lossless`
+
+**Unified lossless decompression** from `.zlfasta` or `.zlfastq` containers. Auto-detects container type from magic bytes.
+
+```
+nyx decompress-lossless <file> [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output PATH` | Output path (default: strip container extension) |
+| `-v, --verbose` | Print subprocess commands |
+| `-f, --force` | Overwrite existing output |
+
+```bash
+nyx decompress-lossless genome.fasta.zlfasta
+nyx decompress-lossless reads.fastq.zlfastq -o reads.fastq
+```
+
+### `nyx compress-lossless-fastq` / `nyx decompress-lossless-fastq`
+
+Format-specific alternatives to the unified commands. Identical behavior but skip auto-detection.
 
 ### `nyx compress`
 
@@ -347,18 +412,33 @@ nyx/
 ├── schemas/                    # SDDL schema files
 │   └── fasta_packed.sddl
 ├── scripts/                    # Build and utility scripts
-│   ├── build.sh                # Compiles openzl + preprocessor
+│   ├── build.sh                # Compiles openzl + codecs + preprocessor
 │   ├── get_openzl.sh           # Clones pinned OpenZL commit
 │   └── make_train_sample.py    # Creates record-safe training samples
 ├── tools/                      # C++ source code
-│   └── genomic_preprocessor.cpp
+│   ├── codec_common.h          # Shared header (mmap, varint, bit packing, sequence encode/decode)
+│   ├── fasta_codec.cpp         # FASTA ↔ binary streams (parallel encoding)
+│   ├── fastq_codec.cpp         # FASTQ ↔ binary streams (parallel encoding)
+│   └── genomic_preprocessor.cpp # FASTA/FASTQ/VCF → binary chunks (for schema-aware compression)
+├── models/                     # Trained per-stream compressor models
+│   ├── lossless/               # FASTA stream compressors
+│   └── lossless_fastq/         # FASTQ stream compressors
+├── tests/                      # Pytest test suite (121 tests)
+│   ├── __init__.py
+│   ├── test_lossless.py        # FASTA round-trip tests (60 tests)
+│   ├── test_lossless_fastq.py  # FASTQ round-trip tests (61 tests)
+│   └── fixtures/               # Test FASTA/FASTQ input files
 ├── openzl/                     # [gitignored] OpenZL source + built binary
-├── bin/                        # [gitignored] Compiled preprocessor binary
+├── bin/                        # [gitignored] Compiled binaries (codecs + preprocessor)
 └── nyx/                        # Python package
     ├── cli.py                  # CLI entry point
     ├── commands/               # Click command implementations
-    │   ├── compress.py
-    │   ├── decompress.py
+    │   ├── compress.py         # nyx compress (schema-aware)
+    │   ├── compress_lossless.py        # nyx compress-lossless (unified auto-detect)
+    │   ├── compress_lossless_fastq.py  # nyx compress-lossless-fastq (explicit)
+    │   ├── decompress.py               # nyx decompress (schema-aware)
+    │   ├── decompress_lossless.py      # nyx decompress-lossless (unified auto-detect)
+    │   ├── decompress_lossless_fastq.py # nyx decompress-lossless-fastq (explicit)
     │   ├── train.py
     │   ├── benchmark.py
     │   ├── inspect_cmd.py
@@ -366,6 +446,10 @@ nyx/
     │   └── build.py
     ├── core/                   # Pipeline logic
     │   ├── openzl.py           # zli subprocess wrapper
+    │   ├── codec.py            # FASTA codec Python wrapper
+    │   ├── fastq_codec.py      # FASTQ codec Python wrapper
+    │   ├── zlfasta.py          # .zlfasta container read/write
+    │   ├── zlfastq.py          # .zlfastq container read/write
     │   ├── preprocessor.py     # genomic_preprocessor wrapper
     │   ├── detect.py           # File type auto-detection
     │   ├── archive.py          # .nyx archive read/write

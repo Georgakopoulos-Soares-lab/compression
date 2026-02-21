@@ -52,8 +52,28 @@ g++ -O3 -std=c++17 -pthread \
 
 echo "  Built: $NYX_ROOT/bin/genomic_preprocessor"
 
+# --- 4) Build the fasta codec ------------------------------------------------
+echo ""
+echo "Building fasta_codec..."
+g++ -O3 -std=c++17 -pthread \
+  -o "$NYX_ROOT/bin/fasta_codec" \
+  "$NYX_ROOT/tools/fasta_codec.cpp"
+
+echo "  Built: $NYX_ROOT/bin/fasta_codec"
+
+# --- 5) Build the fastq codec ------------------------------------------------
+echo ""
+echo "Building fastq_codec..."
+g++ -O3 -std=c++17 -pthread \
+  -o "$NYX_ROOT/bin/fastq_codec" \
+  "$NYX_ROOT/tools/fastq_codec.cpp"
+
+echo "  Built: $NYX_ROOT/bin/fastq_codec"
+
 # --- Done ------------------------------------------------------------------
 echo ""
 echo "Build complete. Binaries:"
 echo "  $OPENZL_DIR/zli"
 echo "  $NYX_ROOT/bin/genomic_preprocessor"
+echo "  $NYX_ROOT/bin/fasta_codec"
+echo "  $NYX_ROOT/bin/fastq_codec"
