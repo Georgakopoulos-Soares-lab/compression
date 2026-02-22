@@ -28,7 +28,6 @@ def iter_fasta_records(path: Path):
                 seq_lines = []
             else:
                 if header is None:
-                    # Skip anything before first header (shouldn't happen in real FASTA)
                     continue
                 seq_lines.append(line)
         if header is not None:
@@ -45,7 +44,7 @@ def main() -> int:
         default=250,
         help=(
             "Target size in MiB (approx). After writing at least 1 record, "
-            "records that would exceed the target are skipped (to stay near the target)."
+            "records that would exceed the target are skipped."
         ),
     )
     args = ap.parse_args()
@@ -65,7 +64,6 @@ def main() -> int:
             record_bytes = len(record_text.encode("utf-8", errors="surrogateescape"))
 
             if records > 0 and written + record_bytes > target_bytes:
-                # Don't overshoot: skip this record and look for smaller ones.
                 continue
 
             w.write(record_text)

@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ---- User-tunable knobs (via env) ----
-THREADS="${THREADS:-16}"                 # OpenZL training threads + xargs parallelism
-TARGET_MIB="${TARGET_MIB:-200}"           # training FASTA size target (~200MiB part)
-MAX_TIME_SECS="${MAX_TIME_SECS:-1800}"    # ~30 minutes
-
-# Compressing the *full* FASTA spawns multiple processes (one per chunk).
-# This can be memory heavy; you can lower this independently from THREADS.
+THREADS="${THREADS:-16}"
+TARGET_MIB="${TARGET_MIB:-200}"
+MAX_TIME_SECS="${MAX_TIME_SECS:-1800}"
 COMPRESS_JOBS="${COMPRESS_JOBS:-$THREADS}"
-
-# Some trained successor graphs (ACE) can be brittle/large on unseen chunks.
-# Default to disabling ACE successors for robustness when testing on full FASTA.
 NO_ACE_SUCCESSORS="${NO_ACE_SUCCESSORS:-1}"
-
-# Preprocessing thread counts:
-# - for the ~250MiB training sample we prefer a *single* output chunk, so use 1 thread.
-# - for the full FASTA we use more threads (but output is still chunked by size/boundaries).
 TRAIN_PRE_THREADS="${TRAIN_PRE_THREADS:-1}"
 FULL_PRE_THREADS="${FULL_PRE_THREADS:-16}"
-
-# Validation mode for the full FASTA: "1" validates all chunks (slow, but thorough)
 VALIDATE_FULL="${VALIDATE_FULL:-1}"
 
 # ---- Paths ----
@@ -46,8 +34,6 @@ mkdir -p "$DATA_DIR" "$OUT_DIR" "$ART_DIR" "$TIME_DIR"
 time_cmd() {
   local outfile="$1"
   shift
-  # macOS /usr/bin/time does not support -f.
-  # We just use -p (POSIX) or default output, and redirect to file.
   if [[ "$OSTYPE" == "darwin"* ]]; then
     /usr/bin/time -l -p "$@" 2> "$outfile"
   else
@@ -65,7 +51,6 @@ get_file_size() {
 }
 
 bytes_sum() {
-  # Sums sizes of files passed as arguments.
   local total=0
   local f sz
   for f in "$@"; do
@@ -97,12 +82,12 @@ have_cmd() {
 }
 
 # ---- 0) Build ----
-"$HERE/scripts/build_all.sh"
+"$HERE/scripts/common/build_all.sh"
 require_exec "$ZLI"
 require_exec "$PRE"
 
 # ---- 1) Download full FASTA ----
-"$HERE/scripts/download_fasta.sh" >/dev/null
+"$HERE/scripts/fasta/download_fasta.sh" >/dev/null
 FASTA_IN="${FASTA_OUT:-$HERE/data/GCF_000001635.27_GRCm39_genomic.fna}"
 if [ ! -f "$FASTA_IN" ]; then
   FASTA_IN="$(ls -1 "$HERE/data"/*.fna 2>/dev/null | head -n1 || true)"
@@ -119,7 +104,7 @@ echo "Original FASTA size: $(human_mib "$orig_bytes")"
 
 # ---- 2) Create ~TARGET_MIB training FASTA (record-safe) ----
 echo "Creating training FASTA (~${TARGET_MIB} MiB): $TRAIN_FASTA"
-python3 "$HERE/scripts/make_train_sample.py" --in "$FASTA_IN" --out "$TRAIN_FASTA" --target-mib "$TARGET_MIB"
+python3 "$HERE/scripts/fasta/make_train_sample.py" --in "$FASTA_IN" --out "$TRAIN_FASTA" --target-mib "$TARGET_MIB"
 
 # ---- 3) Preprocess training FASTA to packed .bin ----
 rm -rf "$TRAIN_CHUNKS" && mkdir -p "$TRAIN_CHUNKS"

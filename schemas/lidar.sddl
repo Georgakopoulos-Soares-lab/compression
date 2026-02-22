@@ -1,0 +1,17 @@
+U32 = UInt32LE
+F32 = Float32LE
+
+# LiDAR Point Cloud Schema
+# Magic "LID1"
+
+magic: Byte[4]
+num_points: U32
+
+# --- Columnar Data ---
+# We store each coordinate as a separate column of floats.
+# This allows the compressor to see the correlation in X, Y, Z separately.
+
+x_coords: F32[num_points]
+y_coords: F32[num_points]
+z_coords: F32[num_points]
+intensity: F32[num_points]

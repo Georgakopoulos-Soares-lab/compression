@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-JSON_TEST_DIR="$HERE/json_test"
-UNIVERSAL_DIR="$JSON_TEST_DIR/universal"
-SCRIPTS_DIR="$UNIVERSAL_DIR/scripts"
-TOOLS_DIR="$UNIVERSAL_DIR/tools"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ZLI="$HERE/openzl/zli"
-PRE="$TOOLS_DIR/geojson_to_bin_universal"
+PRE="$HERE/tools/geojson_to_bin_universal"
+SCHEMA_SCANNER="$HERE/tools/scan_geojson_schema.py"
 
 # ---- Arguments ----
 if [ "$#" -lt 1 ]; then
@@ -20,7 +17,7 @@ THREADS="${2:-8}"
 CHUNK_MB="${3:-100}"
 BASENAME=$(basename "$INPUT_JSON" .json)
 
-# Experiment Directory is where the input JSON lives
+# Experiment directory is where the input JSON lives
 EXP_DIR="$(cd "$(dirname "$INPUT_JSON")" && pwd)"
 
 # ---- Derived Paths ----
@@ -79,7 +76,7 @@ calc_speed() {
 }
 
 # ---- 0) Build ----
-bash "$SCRIPTS_DIR/build.sh" > /dev/null 2>&1
+"$HERE/scripts/common/build_all.sh" > /dev/null 2>&1
 
 echo "================================================================"
 echo "Dataset: $BASENAME"
@@ -88,8 +85,8 @@ echo "Size:    $(human_mib "$orig_bytes")"
 echo "================================================================"
 
 # ---- 1) Scan Schema ----
-echo "[1/7] Scanning schema..."
-python3 "$TOOLS_DIR/scan_geojson_schema.py" \
+echo "[1/8] Scanning schema..."
+python3 "$SCHEMA_SCANNER" \
     --in "$INPUT_JSON" \
     --out-sddl "$OUT_SDDL" \
     --out-map "$OUT_MAP" \
@@ -97,17 +94,17 @@ python3 "$TOOLS_DIR/scan_geojson_schema.py" \
 
 # ---- 2) Create Training Sample ----
 if [ ! -f "$TRAIN_SAMPLE" ]; then
-    echo "[2/7] Creating training sample..."
-    python3 "$SCRIPTS_DIR/make_json_train_sample.py" --in "$INPUT_JSON" --out "$TRAIN_SAMPLE" --target-mib 20 > /dev/null
+    echo "[2/8] Creating training sample..."
+    python3 "$HERE/scripts/geojson/make_train_sample.py" --in "$INPUT_JSON" --out "$TRAIN_SAMPLE" --target-mib 20 > /dev/null
 fi
 
 # ---- 3) Preprocess Training ----
 rm -rf "$TRAIN_CHUNKS" && mkdir -p "$TRAIN_CHUNKS"
-echo "[3/7] Preprocessing training sample..."
+echo "[3/8] Preprocessing training sample..."
 "$PRE" "$TRAIN_SAMPLE" "$OUT_MAP" "$TRAIN_CHUNKS" "$CHUNK_MB" > /dev/null
 
 # ---- 4) Train ----
-echo "[4/7] Training OpenZL model..."
+echo "[4/8] Training OpenZL model..."
 time_cmd "$TIME_DIR/train.time" \
   "$ZLI" train "$TRAIN_CHUNKS" \
     --profile sddl --profile-arg "$OUT_SDDL" \
@@ -117,7 +114,7 @@ time_cmd "$TIME_DIR/train.time" \
 
 # ---- 5) Preprocess Full ----
 rm -rf "$FULL_CHUNKS" && mkdir -p "$FULL_CHUNKS"
-echo "[5/7] Preprocessing FULL JSON..."
+echo "[5/8] Preprocessing FULL JSON..."
 time_cmd "$TIME_DIR/prep_full.time" \
   "$PRE" "$INPUT_JSON" "$OUT_MAP" "$FULL_CHUNKS" "$CHUNK_MB" > /dev/null
 
@@ -127,7 +124,7 @@ prep_time=$(get_time_sec "$TIME_DIR/prep_full.time")
 prep_speed=$(calc_speed "$orig_bytes" "$prep_time")
 
 # ---- 6) Compress Full ----
-echo "[6/7] Compressing with OpenZL..."
+echo "[6/8] Compressing with OpenZL..."
 time_cmd "$TIME_DIR/comp_full.time" \
   bash -c 'find "$1" -maxdepth 1 -type f -name "*.bin" -print0 | \
       xargs -0 -P "$2" -I {} "$3" compress "{}" --compressor "$4" --output "{}.zl" --force' \
@@ -138,27 +135,33 @@ full_out_bytes="$(bytes_sum "${FULL_ZLS[@]}")"
 comp_time=$(get_time_sec "$TIME_DIR/comp_full.time")
 comp_speed=$(calc_speed "$full_in_bytes" "$comp_time")
 
-# ---- 7) Zstd Baseline ----
-echo "[7/7] Running Zstd..."
+# ---- 7) Baselines ----
+echo "[7/8] Running baselines..."
+pigz_bytes=0; pigz_time=0; pigz_speed="N/A"
+zstd_bytes=0; zstd_time=0; zstd_speed="N/A"
+
+if command -v pigz >/dev/null; then
+    PIGZ_OUT="$EXP_DIR/${BASENAME}.json.gz"
+    time_cmd "$TIME_DIR/pigz.time" pigz -9 -k -f -c "$INPUT_JSON" > "$PIGZ_OUT"
+    pigz_bytes="$(get_file_size "$PIGZ_OUT")"
+    pigz_time=$(get_time_sec "$TIME_DIR/pigz.time")
+    pigz_speed=$(calc_speed "$orig_bytes" "$pigz_time")
+fi
+
 if command -v zstd >/dev/null; then
     ZSTD_OUT="$EXP_DIR/${BASENAME}.json.zst"
     time_cmd "$TIME_DIR/zstd.time" zstd -9 -f -c "$INPUT_JSON" > "$ZSTD_OUT"
     zstd_bytes="$(get_file_size "$ZSTD_OUT")"
     zstd_time=$(get_time_sec "$TIME_DIR/zstd.time")
     zstd_speed=$(calc_speed "$orig_bytes" "$zstd_time")
-else
-    zstd_bytes=0; zstd_time=0; zstd_speed="N/A"
 fi
 
 # ---- 8) Validation ----
 echo "[8/8] Validating Decompression..."
-# Decompress all .zl files
 bash -c 'find "$1" -maxdepth 1 -type f -name "*.zl" -print0 | \
     xargs -0 -P "$2" -I {} "$3" decompress "{}" --output "{}.dec" --force' \
     _ "$FULL_CHUNKS" "$THREADS" "$ZLI" > /dev/null
 
-# Compare original bins with decompressed bins
-echo "Verifying integrity..."
 VALIDATION_FAIL=0
 for orig in "$FULL_CHUNKS"/*.bin; do
     dec="$orig.zl.dec"
@@ -176,7 +179,6 @@ done
 
 if [ "$VALIDATION_FAIL" -eq 0 ]; then
     echo "Validation OK: All files match."
-    # Clean up decompressed files to save space
     rm -f "$FULL_CHUNKS"/*.dec
 else
     echo "Validation FAILED."
@@ -194,6 +196,10 @@ echo "--------------------"
 printf "%-15s | %-12s | %-10s\n" "Method" "Size" "Ratio"
 echo "----------------|--------------|-----------"
 printf "%-15s | %-12s | %-10s\n" "Original JSON" "$(human_mib "$orig_bytes")" "1.00x"
+if [ "$pigz_bytes" -gt 0 ]; then
+    ratio=$(python3 -c "print(f'{${orig_bytes}/${pigz_bytes}:.2f}')")
+    printf "%-15s | %-12s | %-10sx\n" "Pigz -9" "$(human_mib "$pigz_bytes")" "$ratio"
+fi
 if [ "$zstd_bytes" -gt 0 ]; then
     ratio=$(python3 -c "print(f'{${orig_bytes}/${zstd_bytes}:.2f}')")
     printf "%-15s | %-12s | %-10sx\n" "Zstd -9" "$(human_mib "$zstd_bytes")" "$ratio"
@@ -205,6 +211,9 @@ echo "2. SPEED"
 echo "--------"
 printf "%-25s | %-10s | %-10s\n" "Stage" "Time" "Speed"
 echo "--------------------------|------------|-----------"
+if [ "$pigz_bytes" -gt 0 ]; then
+    printf "%-25s | %-10ss | %-10s\n" "Pigz (End-to-End)" "$pigz_time" "$pigz_speed"
+fi
 if [ "$zstd_bytes" -gt 0 ]; then
     printf "%-25s | %-10ss | %-10s\n" "Zstd (End-to-End)" "$zstd_time" "$zstd_speed"
 fi

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ZLI="$HERE/openzl/zli"
-TOOLS_DIR="$HERE/tools"
-PRE="$TOOLS_DIR/geojson_to_bin_universal"
+PRE="$HERE/tools/geojson_to_bin_universal"
 
 # ---- Arguments ----
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <input_geojson> <compressor_path> [threads] [chunk_mb]"
-    echo "Example: $0 benchmarks/data/citylots/citylots.json benchmarks/data/citylots/citylots.compressor"
+    echo "Example: $0 data/citylots.json artifacts/citylots.compressor"
     exit 1
 fi
 
@@ -108,7 +107,6 @@ zstd_speed=$(calc_speed "$orig_bytes" "$zstd_time")
 echo ""
 echo "[2/2] Running OpenZL..."
 
-# Check if we need to preprocess
 if [ ! -d "$FULL_CHUNKS" ] || [ -z "$(ls -A "$FULL_CHUNKS"/*.bin 2>/dev/null)" ]; then
     echo "  Preprocessing JSON to binary chunks..."
     if [ ! -f "$MAPPING" ]; then
@@ -116,7 +114,7 @@ if [ ! -d "$FULL_CHUNKS" ] || [ -z "$(ls -A "$FULL_CHUNKS"/*.bin 2>/dev/null)" ]
         echo "  Please run the full pipeline first to generate the mapping."
         exit 1
     fi
-    
+
     rm -rf "$FULL_CHUNKS" && mkdir -p "$FULL_CHUNKS"
     time_cmd "$TIME_DIR/prep.time" \
       "$PRE" "$INPUT_JSON" "$MAPPING" "$FULL_CHUNKS" "$CHUNK_MB" > /dev/null
@@ -143,7 +141,6 @@ time_cmd "$TIME_DIR/comp.time" \
 
 comp_time=$(get_time_sec "$TIME_DIR/comp.time")
 
-# Calculate total size
 openzl_bytes=0
 for f in "$FULL_CHUNKS"/*.zl; do
     if [ -f "$f" ]; then
@@ -164,20 +161,15 @@ printf "%-20s | %-12s | %-10s | %-15s\n" "Method" "Size" "Ratio" "Speed (End-to-
 echo "---------------------|--------------|------------|---------------------"
 printf "%-20s | %-12s | %-10s | %-15s\n" "Original JSON" "$(human_mib "$orig_bytes")" "1.00x" "-"
 
-# Zstd
 if [ "$zstd_bytes" -gt 0 ]; then
     ratio=$(python3 -c "print(f'{${orig_bytes}/${zstd_bytes}:.2f}')")
     printf "%-20s | %-12s | %-10sx | %-15s\n" "Zstd -9" "$(human_mib "$zstd_bytes")" "$ratio" "$zstd_speed"
 fi
 
-# OpenZL
 if [ "$openzl_bytes" -gt 0 ]; then
     ratio=$(python3 -c "print(f'{${orig_bytes}/${openzl_bytes}:.2f}')")
-    
-    # Calculate total time (prep + comp)
     total_time=$(python3 -c "print(f'{float($prep_time) + float($comp_time)}')")
     speed=$(calc_speed "$orig_bytes" "$total_time")
-    
     printf "%-20s | %-12s | %-10sx | %-15s\n" "OpenZL (Offline)" "$(human_mib "$openzl_bytes")" "$ratio" "$speed"
 fi
 

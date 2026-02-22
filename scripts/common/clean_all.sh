@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 shopt -s nullglob
 
-# Generated outputs from demos/benchmarks
+# Generated outputs from all pipelines
 TARGETS=(
   "$HERE"/chunks*
   "$HERE"/artifacts*
@@ -15,12 +15,13 @@ TARGETS=(
 # Locally built binaries (rebuildable)
 TARGETS+=(
   "$HERE/tools/biocompress_preprocessor"
+  "$HERE/tools/geojson_to_bin_universal"
+  "$HERE/tools/lidar_preprocessor"
 )
 
-# Remove
 for t in "${TARGETS[@]}"; do
   rm -rf "$t"
 done
 
 echo "Cleaned generated outputs under: $HERE"
-echo "Kept: $HERE/data (downloads), $HERE/openzl (checkout), schemas/tools/scripts/docs"
+echo "Kept: data/ (downloads), openzl/ (checkout), schemas/, tools/ (sources), scripts/"

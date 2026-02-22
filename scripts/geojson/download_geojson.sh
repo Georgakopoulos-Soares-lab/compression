@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DATA_DIR="${DATA_DIR:-$HERE/data}"
 mkdir -p "$DATA_DIR"
 
@@ -22,4 +22,4 @@ else
   echo "Already downloaded: $JSON_OUT"
 fi
 
-echo "JSON: $JSON_OUT"
+echo "GeoJSON: $JSON_OUT"
