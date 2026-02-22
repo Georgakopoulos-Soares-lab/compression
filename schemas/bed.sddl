@@ -1,0 +1,68 @@
+# BED binary format (variable 3-12 columns) - from biocompress_preprocessor.cpp
+# Magic "BED1"
+# Required: chrom (as chrom_id), chromStart, chromEnd.
+# Optional columns 4-12 always present (name, score, strand, thickStart, thickEnd, itemRgb, blockCount, blockSizes, blockStarts); empty when num_columns < 4.
+
+U32 = UInt32LE
+U8  = UInt8
+
+magic         : Byte[4]
+num_records   : U32
+num_columns   : U8   # 3-12
+
+# Chromosome names: unique names stored once, then chrom_id per record
+chrom_count       : U32
+chrom_offsets     : U32[chrom_count + 1]
+chrom_names_total : U32
+chrom_names_pad   : U32
+chrom_names       : Byte[chrom_names_total + chrom_names_pad]
+
+chrom_ids : U32[num_records]
+starts    : U32[num_records]
+ends      : U32[num_records]
+
+# Optional columns 4-12 (offsets + total + pad + data; empty when num_columns < 4)
+name_offsets : U32[num_records + 1]
+name_total   : U32
+name_pad     : U32
+name_data    : Byte[name_total + name_pad]
+
+score_offsets : U32[num_records + 1]
+score_total  : U32
+score_pad    : U32
+score_data   : Byte[score_total + score_pad]
+
+strand_offsets : U32[num_records + 1]
+strand_total  : U32
+strand_pad    : U32
+strand_data   : Byte[strand_total + strand_pad]
+
+thickStart_offsets : U32[num_records + 1]
+thickStart_total   : U32
+thickStart_pad     : U32
+thickStart_data    : Byte[thickStart_total + thickStart_pad]
+
+thickEnd_offsets : U32[num_records + 1]
+thickEnd_total   : U32
+thickEnd_pad     : U32
+thickEnd_data    : Byte[thickEnd_total + thickEnd_pad]
+
+itemRgb_offsets : U32[num_records + 1]
+itemRgb_total   : U32
+itemRgb_pad     : U32
+itemRgb_data    : Byte[itemRgb_total + itemRgb_pad]
+
+blockCount_offsets : U32[num_records + 1]
+blockCount_total   : U32
+blockCount_pad     : U32
+blockCount_data    : Byte[blockCount_total + blockCount_pad]
+
+blockSizes_offsets : U32[num_records + 1]
+blockSizes_total   : U32
+blockSizes_pad     : U32
+blockSizes_data    : Byte[blockSizes_total + blockSizes_pad]
+
+blockStarts_offsets : U32[num_records + 1]
+blockStarts_total   : U32
+blockStarts_pad     : U32
+blockStarts_data   : Byte[blockStarts_total + blockStarts_pad]

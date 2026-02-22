@@ -6,6 +6,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -58,6 +59,10 @@ struct MappedFile {
 
 void write_u32(std::ofstream& out, uint32_t val) {
     out.write(reinterpret_cast<const char*>(&val), 4);
+}
+
+void write_u8(std::ofstream& out, uint8_t val) {
+    out.write(reinterpret_cast<const char*>(&val), 1);
 }
 
 void pad_stream(std::ofstream& out, size_t size, size_t align = 4) {
@@ -724,10 +729,140 @@ void process_vcf_chunk(const char* start, const char* end, const std::string& ou
 }
 
 // ============================================================================
+// BED Processor (variable 3-12 columns)
+// ============================================================================
+
+void process_bed_chunk(const char* start, const char* end, const std::string& output_path) {
+    std::map<std::string, uint32_t> chrom_map;
+    std::vector<std::string> chrom_order;
+    std::vector<uint32_t> chrom_ids, starts, ends;
+
+    // Optional columns 4-12: name, score, strand, thickStart, thickEnd, itemRgb, blockCount, blockSizes, blockStarts
+    std::vector<std::vector<uint32_t>> opt_offsets(9, std::vector<uint32_t>{0});
+    std::vector<std::vector<char>> opt_data(9);
+
+    uint32_t num_columns = 0;
+    const char* cursor = start;
+
+    while (cursor < end) {
+        const char* line_end = (const char*)memchr(cursor, '\n', end - cursor);
+        if (!line_end) line_end = end;
+
+        // Skip track/browser header lines
+        if (end - cursor >= 5 && (memcmp(cursor, "track", 5) == 0 || memcmp(cursor, "browser", 7) == 0)) {
+            cursor = line_end + 1;
+            continue;
+        }
+
+        // Parse tab-separated columns
+        std::vector<std::string> cols;
+        const char* col_start = cursor;
+        while (col_start < line_end) {
+            const char* col_end = (const char*)memchr(col_start, '\t', line_end - col_start);
+            if (!col_end) col_end = line_end;
+            cols.emplace_back(col_start, col_end - col_start);
+            col_start = col_end + 1;
+        }
+
+        if (cols.size() < 3) {
+            cursor = line_end + 1;
+            continue;
+        }
+
+        if (num_columns == 0)
+            num_columns = static_cast<uint32_t>(std::min(cols.size(), size_t(12)));
+        uint32_t ncol = static_cast<uint32_t>(std::min(cols.size(), size_t(12)));
+
+        // Chrom
+        auto it = chrom_map.find(cols[0]);
+        if (it == chrom_map.end()) {
+            uint32_t id = static_cast<uint32_t>(chrom_order.size());
+            chrom_map[cols[0]] = id;
+            chrom_order.push_back(cols[0]);
+            chrom_ids.push_back(id);
+        } else {
+            chrom_ids.push_back(it->second);
+        }
+
+        // Start, end (required)
+        uint32_t s = 0, e = 0;
+        try { s = static_cast<uint32_t>(std::stoul(cols[1])); } catch (...) {}
+        try { e = static_cast<uint32_t>(std::stoul(cols[2])); } catch (...) {}
+        starts.push_back(s);
+        ends.push_back(e);
+
+        // Optional columns 3..num_columns-1 (BED columns 4..num_columns); one offset per optional column per record
+        for (uint32_t c = 3; c < 12 && c < num_columns; ++c) {
+            size_t idx = c - 3;
+            if (c < ncol) {
+                const std::string& val = cols[c];
+                opt_data[idx].insert(opt_data[idx].end(), val.begin(), val.end());
+            }
+            opt_offsets[idx].push_back(static_cast<uint32_t>(opt_data[idx].size()));
+        }
+
+        cursor = line_end + 1;
+    }
+
+    uint32_t num_records = static_cast<uint32_t>(chrom_ids.size());
+    if (num_records == 0) num_columns = 3;
+
+    // Build chrom_names blob and chrom_offsets
+    std::vector<char> chrom_names;
+    std::vector<uint32_t> chrom_offsets;
+    chrom_offsets.push_back(0);
+    for (const std::string& name : chrom_order) {
+        chrom_names.insert(chrom_names.end(), name.begin(), name.end());
+        chrom_offsets.push_back(static_cast<uint32_t>(chrom_names.size()));
+    }
+    uint32_t chrom_count = static_cast<uint32_t>(chrom_order.size());
+    uint32_t chrom_names_total = static_cast<uint32_t>(chrom_names.size());
+    uint32_t chrom_names_pad = (4 - (chrom_names_total % 4)) % 4;
+
+    std::ofstream out(output_path, std::ios::binary);
+    out.write("BED1", 4);
+    write_u32(out, num_records);
+    write_u8(out, static_cast<uint8_t>(num_columns));
+
+    write_u32(out, chrom_count);
+    out.write(reinterpret_cast<const char*>(chrom_offsets.data()), chrom_offsets.size() * 4);
+    write_u32(out, chrom_names_total);
+    write_u32(out, chrom_names_pad);
+    out.write(chrom_names.data(), chrom_names.size());
+    pad_stream(out, chrom_names.size(), 4);
+
+    out.write(reinterpret_cast<const char*>(chrom_ids.data()), num_records * 4);
+    out.write(reinterpret_cast<const char*>(starts.data()), num_records * 4);
+    out.write(reinterpret_cast<const char*>(ends.data()), num_records * 4);
+
+    auto write_opt = [&](size_t idx) {
+        std::vector<uint32_t>& offs = opt_offsets[idx];
+        if (num_columns >= 4u + idx) {
+            while (offs.size() < num_records + 1)
+                offs.push_back(static_cast<uint32_t>(opt_data[idx].size()));
+            out.write(reinterpret_cast<const char*>(offs.data()), offs.size() * 4);
+            uint32_t total = static_cast<uint32_t>(opt_data[idx].size());
+            uint32_t pad = (4 - (total % 4)) % 4;
+            write_u32(out, total);
+            write_u32(out, pad);
+            out.write(opt_data[idx].data(), opt_data[idx].size());
+            pad_stream(out, opt_data[idx].size(), 4);
+        } else {
+            for (uint32_t j = 0; j <= num_records; ++j) write_u32(out, 0);
+            write_u32(out, 0);
+            write_u32(out, 0);
+        }
+    };
+    for (size_t i = 0; i < 9; ++i) write_opt(i);
+
+    out.close();
+}
+
+// ============================================================================
 // Main Logic
 // ============================================================================
 
-enum FileType { UNKNOWN, FASTQ, FASTA, VCF, FASTQ_V4, FASTA_PACKED };
+enum FileType { UNKNOWN, FASTQ, FASTA, VCF, FASTQ_V4, FASTA_PACKED, BED };
 
 FileType detect_type(const char* data, size_t size) {
     if (size < 100) return UNKNOWN;
@@ -744,6 +879,28 @@ FileType detect_type(const char* data, size_t size) {
                 if (l2 + 1 < head.size() && head[l2 + 1] == '+') return FASTQ;
             }
         }
+    }
+    // BED: optional track/browser lines then data lines: word \t number \t number
+    const char* p = data;
+    const char* end = data + std::min(size, (size_t)1024);
+    while (p < end) {
+        const char* line_end = (const char*)memchr(p, '\n', end - p);
+        if (!line_end) break;
+        if (line_end > p) {
+            if (end - p >= 5 && (memcmp(p, "track", 5) == 0 || memcmp(p, "browser", 7) == 0)) {
+                p = line_end + 1;
+                continue;
+            }
+            const char* t1 = (const char*)memchr(p, '\t', line_end - p);
+            if (t1 && t1 + 1 < line_end) {
+                const char* t2 = (const char*)memchr(t1 + 1, '\t', line_end - (t1 + 1));
+                if (t2 && t2 + 1 < line_end) {
+                    if (std::isdigit(static_cast<unsigned char>(t1[1])) && std::isdigit(static_cast<unsigned char>(t2[1])))
+                        return BED;
+                }
+            }
+        }
+        p = line_end + 1;
     }
     return UNKNOWN;
 }
@@ -768,10 +925,11 @@ int main(int argc, char* argv[]) {
         else if (type_str == "fasta") type = FASTA;
         else if (type_str == "fasta_packed") type = FASTA_PACKED;
         else if (type_str == "vcf") type = VCF;
+        else if (type_str == "bed") type = BED;
         else if (type_str == "") type = detect_type(file.data, file.size);
         
         if (type == UNKNOWN) {
-            std::cerr << "Unknown file type. Please specify fastq, fastq_v4, fasta, or vcf." << std::endl;
+            std::cerr << "Unknown file type. Please specify fastq, fastq_v4, fasta, fasta_packed, vcf, or bed." << std::endl;
             return 1;
         }
 
@@ -821,6 +979,8 @@ int main(int argc, char* argv[]) {
                     if (*cursor == '>' && *(cursor-1) == '\n') break;
                 } else if (type == VCF) {
                     if (*cursor != '#' && *(cursor-1) == '\n') break; // Start of record
+                } else if (type == BED) {
+                    if (*(cursor-1) == '\n') break; // Line boundary
                 }
                 cursor++;
             }
@@ -850,6 +1010,7 @@ int main(int argc, char* argv[]) {
             else if (type == FASTA) snprintf(filename, sizeof(filename), "chunk_%05zu.fasta.bin", idx);
             else if (type == FASTA_PACKED) snprintf(filename, sizeof(filename), "chunk_%05zu.fasta_packed.bin", idx);
             else if (type == VCF) snprintf(filename, sizeof(filename), "chunk_%05zu.vcf.bin", idx);
+            else if (type == BED) snprintf(filename, sizeof(filename), "chunk_%05zu.bed.bin", idx);
 
             std::string out_path = output_dir + "/" + filename;
 
@@ -858,6 +1019,7 @@ int main(int argc, char* argv[]) {
             else if (type == FASTA) process_fasta_chunk(start, end, out_path);
             else if (type == FASTA_PACKED) process_fasta_packed_chunk(start, end, out_path);
             else if (type == VCF) process_vcf_chunk(start, end, out_path, vcf_header);
+            else if (type == BED) process_bed_chunk(start, end, out_path);
         };
 
         std::vector<std::thread> threads;
