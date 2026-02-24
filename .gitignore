@@ -2,6 +2,7 @@
 /data/
 
 # Generated outputs (pipeline)
+/out/
 /out*/
 /artifacts*/
 /chunks*/
@@ -12,6 +13,9 @@
 
 # Build artifacts
 /tools/biocompress_preprocessor
+/tools/bed_preprocess
+/tools/fastq_preprocess
+/tools/tabular_chunker
 
 # OS / editor
 .DS_Store
