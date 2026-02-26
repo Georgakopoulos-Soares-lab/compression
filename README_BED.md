@@ -55,14 +55,6 @@ Decoded  BED ◄── bed_preprocess decode ◄── .meta + .tsv ◄── Op
 
 ## Reproduction Steps
 
-**One-liner** (after running `build_all.sh` and `download_bed.sh`):
-```bash
-bash scripts/bed/run_bed_benchmark.sh
-```
-This preprocesses, compresses with the trained compressor, runs all baseline tools, writes `artifacts/bed_benchmark.csv`, and produces `artifacts/bed_benchmark_plot.png`.
-
-Manual steps:
-
 ### 0) Prerequisites
 
 ```bash

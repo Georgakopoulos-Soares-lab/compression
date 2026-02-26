@@ -41,14 +41,20 @@ g++ -O2 -std=c++17 -pthread \
   -o "$HERE/tools/fastq_preprocess" \
   "$HERE/tools/fastq_preprocess.cpp"
 
-# 6) Build the tabular chunker (used by VCF pipeline)
-g++ -O2 -std=c++17 \
-  -o "$HERE/tools/tabular_chunker" \
-  "$HERE/tools/tabular_chunker.cpp"
+# 6) Build the VCF preprocessor (header/body split + chunking)
+g++ -O2 -std=c++17 -pthread \
+  -o "$HERE/tools/vcf_preprocessing" \
+  "$HERE/tools/vcf_preprocessing.cpp"
+
+# 7) Build the VCF postprocessor (reassembly from chunks)
+g++ -O2 -std=c++17 -pthread \
+  -o "$HERE/tools/vcf_postprocess" \
+  "$HERE/tools/vcf_postprocess.cpp"
 
 echo "Build OK:"
 echo "  $HERE/openzl/zli"
 echo "  $HERE/tools/biocompress_preprocessor"
 echo "  $HERE/tools/bed_preprocess"
 echo "  $HERE/tools/fastq_preprocess"
-echo "  $HERE/tools/tabular_chunker"
+echo "  $HERE/tools/vcf_preprocessing"
+echo "  $HERE/tools/vcf_postprocess"

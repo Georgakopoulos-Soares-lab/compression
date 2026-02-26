@@ -70,14 +70,6 @@ for maximum throughput (~500 MB/s on modern hardware).
 
 ## Reproduction Steps
 
-**One-liner** (after running `build_all.sh` and `download_fastq.sh`):
-```bash
-bash scripts/fastq/run_fastq_benchmark.sh
-```
-This preprocesses, compresses with the trained compressor, runs all baseline tools, writes `artifacts/fastq_benchmark.csv`, and produces `artifacts/fastq_benchmark_plot.png`.
-
-Manual steps:
-
 ### 0) Prerequisites
 
 ```bash
