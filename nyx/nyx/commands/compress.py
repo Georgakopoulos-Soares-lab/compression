@@ -1,5 +1,6 @@
-"""nyx compress — the primary command orchestrating the full pipeline."""
+"""nyx compress — unified compression command for all file types."""
 
+import os
 import shutil
 import tempfile
 import time
@@ -13,169 +14,378 @@ from tqdm import tqdm
 from ..core import openzl, preprocessor, archive, sample
 from ..core.benchmark import BenchmarkResult, run_benchmarks, print_benchmark_table
 from ..core.config import (
-    DEFAULT_COMPRESS_JOBS,
     DEFAULT_MAX_TIME_SECS,
-    DEFAULT_THREADS,
-    DEFAULT_TRAIN_MIB,
     DEFAULT_PROFILE,
     SCHEMA_REGISTRY,
 )
-from ..core.detect import detect_filetype, is_genomic
+from ..core.detect import detect_filetype, detect_fasta_subtype, is_genomic
 from ..utils.paths import find_schema
+from ._lossless import (
+    compress_fasta_packed,
+    compress_protein_packed,
+    compress_csv_fastq,
+    DEFAULT_FASTA_MODELS_DIR,
+    DEFAULT_CSV_MODELS_DIR,
+)
 
 
 @click.command("compress")
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False))
 @click.option("-o", "--output", "output_file", type=click.Path(),
-              default=None, help="Output .nyx file path (default: <input>.nyx).")
-@click.option("--mode", "mode",
-              type=click.Choice(["train_plain", "train_custom", "default",
-                                 "inline_train"]),
-              default=None,
-              help="Compression mode. Auto-selected if omitted.")
+              default=None, help="Output file path (auto-determined by pipeline).")
+@click.option("-t", "--type", "filetype",
+              type=click.Choice(["auto", "fasta", "protein", "fastq", "vcf", "generic"]),
+              default="auto",
+              help="File type (default: auto-detect). Use 'protein' for protein FASTA.")
+@click.option("--mode",
+              type=click.Choice(["auto", "lossless", "schema", "generic", "inline"]),
+              default="auto",
+              help="Compression mode (default: auto-select based on file type).")
+@click.option("--train", "do_train", is_flag=True,
+              help="Train compressors before compressing (improves ratio).")
+@click.option("--models-dir", type=click.Path(file_okay=False),
+              default=None, help="Directory for trained compressor models (lossless).")
+@click.option("--no-trained", is_flag=True,
+              help="Ignore trained compressors, use generic profile.")
+@click.option("--group-train", type=click.Path(exists=True, file_okay=False),
+              default=None, help="Train from directory of sample files (lossless).")
 @click.option("--sddl", type=click.Path(exists=True),
-              help="Path to SDDL schema file (required for train_custom).")
-@click.option("--type", "filetype",
-              type=click.Choice(["fasta", "fastq", "vcf"]),
-              default=None, help="Override auto-detected file type.")
-@click.option("--threads", type=int, default=None,
-              help=f"Thread count for training/preprocessing (default: {DEFAULT_THREADS}).")
+              help="Custom SDDL schema (forces schema mode).")
+@click.option("--threads", type=int, default=1,
+              help="Encoding/preprocessing threads (default: 1).")
+@click.option("--train-threads", type=int, default=None,
+              help="OpenZL training threads (default: CPU count).")
 @click.option("--max-time-secs", type=int, default=None,
-              help=f"Training time budget in seconds (default: {DEFAULT_MAX_TIME_SECS}).")
-@click.option("--compress-jobs", type=int, default=DEFAULT_COMPRESS_JOBS,
-              help=f"Parallel compression jobs (default: {DEFAULT_COMPRESS_JOBS}).")
-@click.option("--target-train-mib", type=int, default=DEFAULT_TRAIN_MIB,
-              help=f"Training sample size in MiB (default: {DEFAULT_TRAIN_MIB}).")
+              help=f"Training time limit in seconds (default: {DEFAULT_MAX_TIME_SECS}).")
+@click.option("--compress-jobs", type=int, default=None,
+              help="Parallel compression jobs (default: CPU count).")
+@click.option("--train-sample-mib", type=int, default=200,
+              help="Training sample size in MiB (default: 200).")
 @click.option("--trainer", type=click.Choice(["greedy", "full-split", "bottom-up"]),
-              default=None, help="Training algorithm (default: greedy).")
+              default=None, help="Training algorithm (schema mode).")
 @click.option("--no-clustering", is_flag=True,
-              help="Skip clustering during training.")
+              help="Skip clustering during training (schema mode).")
 @click.option("--benchmark", is_flag=True,
-              help="Run competitor benchmarks (gzip, pigz, zstd) and print comparison table.")
+              help="Run competitor benchmarks (gzip, pigz, zstd).")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output.")
-@click.option("-f", "--force", is_flag=True, help="Overwrite output file.")
-def compress_cmd(input_file, output_file, mode, sddl, filetype, threads,
-                 max_time_secs, compress_jobs, target_train_mib, trainer,
+@click.option("-f", "--force", is_flag=True, help="Overwrite existing output file.")
+def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
+                 no_trained, group_train, sddl, threads, train_threads,
+                 max_time_secs, compress_jobs, train_sample_mib, trainer,
                  no_clustering, benchmark, keep_temp, verbose, force):
-    """Compress a file using OpenZL.
+    """Compress a file using Nyx.
 
-    Supports genomic formats (FASTA, FASTQ, VCF) with schema-aware compression,
-    and generic files with standard compression.
+    Supports lossless compression for FASTA and FASTQ, schema-aware
+    compression for genomic files with SDDL schemas, and generic
+    compression for any file.
 
-    Use --benchmark to compare results against gzip, pigz, and zstd.
+    \b
+    Auto-routing (--mode auto, the default):
+      FASTA file  → lossless packed (auto-detects nucleotide/protein) → .zlfasta
+      FASTQ file  → lossless CSV decomposition                       → .zlfastq
+      Other       → generic OpenZL compression                       → .nyx
+
+    \b
+    Compression modes (--mode):
+      auto      Auto-select the best mode based on file type (default)
+      lossless  Byte-exact lossless compression (FASTA/FASTQ only)
+      schema    Schema-aware compression using SDDL (genomic files)
+      generic   Generic OpenZL compression (any file, fast)
+      inline    Generic with inline training (moderate compression, no separate train step)
+
+    \b
+    File type override (--type):
+      auto      Auto-detect from file extension and content (default)
+      fasta     Force FASTA (nucleotide) processing
+      protein   Force protein FASTA processing
+      fastq     Force FASTQ processing
+      vcf       Force VCF processing
+      generic   Force generic (non-genomic) processing
+
+    \b
+    Lossless pipeline flags:
+      --train                 Train stream compressors before compressing (better ratio)
+      --models-dir DIR        Directory to store/load trained compressor models
+      --no-trained            Ignore any trained compressors, use generic profile
+      --group-train DIR       Train from a directory of sample files instead of the input
+
+    \b
+    Schema pipeline flags:
+      --sddl PATH             Path to a custom SDDL schema file (forces --mode schema)
+      --trainer ALGO          Training algorithm: greedy, full-split, or bottom-up
+      --no-clustering         Skip clustering during training
+
+    \b
+    Performance flags:
+      --threads N             Encoding/preprocessing threads (default: 1)
+      --train-threads N       OpenZL training threads (default: all CPUs)
+      --max-time-secs N       Training time budget in seconds (default: 1800)
+      --compress-jobs N       Parallel chunk compression jobs (default: all CPUs)
+      --train-sample-mib N    Training sample size in MiB (default: 200)
+
+    \b
+    Output and behavior:
+      -o, --output PATH       Output file path (auto-determined if omitted)
+      -f, --force             Overwrite existing output file
+      -v, --verbose           Verbose output
+      --benchmark             Run gzip, pigz, zstd benchmarks and print comparison table
+      --keep-temp             Keep temporary directories for debugging
+
+    \b
+    Examples:
+      nyx compress genome.fasta                  # lossless FASTA → .zlfasta
+      nyx compress reads.fastq                   # lossless FASTQ → .zlfastq
+      nyx compress proteins.fasta --type protein # protein FASTA → .zlfasta
+      nyx compress genome.fasta --train          # train + lossless compress
+      nyx compress data.bin                      # generic → .nyx
+      nyx compress genome.fasta --mode schema    # schema-aware → .nyx
+      nyx compress genome.fasta --benchmark      # compress + benchmark competitors
+      nyx compress reads.fastq --train --group-train /path/to/samples/
     """
     input_path = Path(input_file).resolve()
-    threads = threads or DEFAULT_THREADS
+    train_threads = train_threads or (os.cpu_count() or 4)
     max_time_secs = max_time_secs or DEFAULT_MAX_TIME_SECS
+    compress_jobs = compress_jobs or (os.cpu_count() or 4)
+    train_sample_bytes = train_sample_mib * 1024 * 1024
 
-    # Detect file type
-    detected = filetype or detect_filetype(input_path)
+    # --- Detect file type ---
+    if filetype == "auto":
+        detected = detect_filetype(input_path)
+    elif filetype == "protein":
+        detected = "fasta"
+    elif filetype == "generic":
+        detected = None
+    else:
+        detected = filetype
+
     genomic = is_genomic(detected)
 
-    # Auto-select mode if not specified
-    if mode is None:
-        mode = "train_plain" if genomic else "default"
+    # --- If --sddl provided, force schema mode ---
+    if sddl and mode == "auto":
+        mode = "schema"
 
-    # Validate mode + options
-    if mode == "train_custom" and not sddl:
-        raise click.UsageError("--sddl is required for train_custom mode.")
+    # --- Auto-select mode ---
+    if mode == "auto":
+        if detected in ("fasta", "fastq"):
+            mode = "lossless"
+        elif genomic:
+            cfg = SCHEMA_REGISTRY.get(detected)
+            if cfg and cfg.sddl:
+                mode = "schema"
+            else:
+                mode = "generic"
+        else:
+            mode = "generic"
 
-    if mode == "train_plain" and not genomic:
+    # --- Validate mode + options ---
+    if mode == "lossless" and detected not in ("fasta", "fastq"):
         raise click.UsageError(
-            f"train_plain requires a genomic file type (fasta/fastq/vcf), "
+            f"Lossless mode requires FASTA or FASTQ input, "
             f"but detected: {detected or 'unknown'}. "
-            f"Use --type to override or --mode default."
+            f"Use --type to override or --mode generic."
         )
 
-    if mode == "train_plain":
-        cfg = SCHEMA_REGISTRY[detected]
-        if cfg.sddl is None:
+    schema_mode = None
+    if mode == "schema":
+        if sddl:
+            schema_mode = "train_custom"
+        elif genomic:
+            cfg = SCHEMA_REGISTRY.get(detected)
+            if not cfg or not cfg.sddl:
+                raise click.UsageError(
+                    f"No SDDL schema available for '{detected}'. "
+                    f"Provide --sddl <path> or use --mode generic."
+                )
+            schema_mode = "train_plain"
+        else:
             raise click.UsageError(
-                f"No SDDL schema available yet for '{detected}'. "
-                f"Use --mode train_custom --sddl <path> instead."
+                "Schema mode requires a genomic file or --sddl. "
+                "Use --mode generic for non-genomic files."
             )
 
-    # Output path
+    # --- Determine output path ---
     if output_file is None:
-        output_file = str(input_path) + ".nyx"
-    output_path = Path(output_file).resolve()
+        if mode == "lossless" and detected == "fasta":
+            output_path = input_path.parent / (input_path.name + ".zlfasta")
+        elif mode == "lossless" and detected == "fastq":
+            output_path = input_path.parent / (input_path.name + ".zlfastq")
+        else:
+            output_path = input_path.parent / (input_path.name + ".nyx")
+    else:
+        output_path = Path(output_file).resolve()
 
     if output_path.exists() and not force:
         raise click.UsageError(
             f"Output file exists: {output_path}. Use -f/--force to overwrite."
         )
 
-    click.echo(f"Compressing {input_path.name} (mode={mode}, type={detected or 'generic'})")
-
-    tmpdir = Path(tempfile.mkdtemp(prefix="nyx_"))
+    # --- Route to pipeline ---
     total_start = time.monotonic()
 
-    try:
-        if mode in ("train_plain", "train_custom"):
-            _compress_trained(
-                input_path=input_path,
-                output_path=output_path,
-                mode=mode,
-                sddl_path=Path(sddl) if sddl else None,
-                detected=detected,
-                tmpdir=tmpdir,
-                threads=threads,
-                max_time_secs=max_time_secs,
-                compress_jobs=compress_jobs,
-                target_train_mib=target_train_mib,
-                trainer=trainer,
-                no_clustering=no_clustering,
-                verbose=verbose,
-            )
-        elif mode == "default":
-            _compress_default(
-                input_path=input_path,
-                output_path=output_path,
-                tmpdir=tmpdir,
-                verbose=verbose,
-            )
-        elif mode == "inline_train":
-            _compress_inline(
-                input_path=input_path,
-                output_path=output_path,
-                detected=detected,
-                genomic=genomic,
-                tmpdir=tmpdir,
-                threads=threads,
-                verbose=verbose,
-            )
+    if mode == "lossless":
+        _run_lossless(
+            input_path=input_path,
+            output_path=output_path,
+            detected=detected,
+            filetype=filetype,
+            do_train=do_train,
+            models_dir=models_dir,
+            no_trained=no_trained,
+            group_train=group_train,
+            verbose=verbose,
+            threads=threads,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            compress_jobs=compress_jobs,
+            train_sample_bytes=train_sample_bytes,
+        )
+    else:
+        # Schema, generic, or inline — managed with shared tmpdir
+        tmpdir = Path(tempfile.mkdtemp(prefix="nyx_"))
+        try:
+            if mode == "schema":
+                click.echo(f"Compressing {input_path.name} "
+                           f"(mode=schema, type={detected or 'generic'})")
+                _compress_trained(
+                    input_path=input_path,
+                    output_path=output_path,
+                    mode=schema_mode,
+                    sddl_path=Path(sddl) if sddl else None,
+                    detected=detected,
+                    tmpdir=tmpdir,
+                    threads=threads,
+                    max_time_secs=max_time_secs,
+                    compress_jobs=compress_jobs,
+                    target_train_mib=train_sample_mib,
+                    trainer=trainer,
+                    no_clustering=no_clustering,
+                    verbose=verbose,
+                )
+            elif mode == "generic":
+                click.echo(f"Compressing {input_path.name} (mode=generic)")
+                _compress_default(
+                    input_path=input_path,
+                    output_path=output_path,
+                    tmpdir=tmpdir,
+                    verbose=verbose,
+                )
+            elif mode == "inline":
+                click.echo(f"Compressing {input_path.name} "
+                           f"(mode=inline, type={detected or 'generic'})")
+                _compress_inline(
+                    input_path=input_path,
+                    output_path=output_path,
+                    detected=detected,
+                    genomic=genomic,
+                    tmpdir=tmpdir,
+                    threads=threads,
+                    verbose=verbose,
+                )
 
+            total_secs = time.monotonic() - total_start
+            size_in = input_path.stat().st_size
+            size_out = output_path.stat().st_size
+            ratio = size_in / size_out if size_out > 0 else 0
+            click.echo(
+                f"\nDone: {_human_size(size_in)} -> {_human_size(size_out)} "
+                f"({ratio:.2f}x) in {_format_time(total_secs)}"
+            )
+        finally:
+            if not keep_temp:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            else:
+                click.echo(f"Temp directory kept: {tmpdir}")
+
+    # --- Benchmark ---
+    if benchmark:
         total_secs = time.monotonic() - total_start
         size_in = input_path.stat().st_size
         size_out = output_path.stat().st_size
-        ratio = size_in / size_out if size_out > 0 else 0
-        click.echo(
-            f"\nDone: {_human_size(size_in)} -> {_human_size(size_out)} "
-            f"({ratio:.2f}x) in {_format_time(total_secs)}"
+        click.echo("\nRunning competitor benchmarks on original file...")
+        nyx_result = BenchmarkResult(
+            name="nyx",
+            original_bytes=size_in,
+            compressed_bytes=size_out,
+            compress_secs=total_secs,
         )
-
-        # Run competitor benchmarks if requested
-        if benchmark:
-            click.echo("\nRunning competitor benchmarks on original file...")
-            nyx_result = BenchmarkResult(
-                name="nyx",
-                original_bytes=size_in,
-                compressed_bytes=size_out,
-                compress_secs=total_secs,
-            )
-            competitor_results = run_benchmarks(input_path, tmpdir)
+        bench_tmpdir = Path(tempfile.mkdtemp(prefix="nyx_bench_"))
+        try:
+            competitor_results = run_benchmarks(input_path, bench_tmpdir)
             print_benchmark_table(nyx_result, competitor_results)
-
-    finally:
-        if not keep_temp:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        else:
-            click.echo(f"Temp directory kept: {tmpdir}")
+        finally:
+            shutil.rmtree(bench_tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
-# Pipeline: train_plain / train_custom
+# Lossless routing
+# ---------------------------------------------------------------------------
+
+def _run_lossless(input_path, output_path, detected, filetype, do_train,
+                  models_dir, no_trained, group_train, verbose, threads,
+                  train_threads, max_time_secs, compress_jobs, train_sample_bytes):
+    """Route to the appropriate lossless compression pipeline."""
+    if detected == "fasta":
+        if filetype == "protein":
+            is_protein = True
+        else:
+            subtype = detect_fasta_subtype(input_path)
+            is_protein = (subtype == "protein")
+
+        fasta_models = Path(models_dir) if models_dir else DEFAULT_FASTA_MODELS_DIR
+
+        if is_protein:
+            click.echo(f"Compressing {input_path.name} (lossless PROTEIN FASTA)")
+            compress_protein_packed(
+                input_path=input_path,
+                output_path=output_path,
+                models_dir=fasta_models,
+                do_train=do_train,
+                no_trained=no_trained,
+                verbose=verbose,
+                threads=threads,
+                train_threads=train_threads,
+                max_time_secs=max_time_secs,
+                train_sample_bytes=train_sample_bytes,
+                compress_jobs=compress_jobs,
+                group_train_dir=group_train,
+            )
+        else:
+            click.echo(f"Compressing {input_path.name} (lossless NUCLEOTIDE FASTA)")
+            compress_fasta_packed(
+                input_path=input_path,
+                output_path=output_path,
+                models_dir=fasta_models,
+                do_train=do_train,
+                no_trained=no_trained,
+                verbose=verbose,
+                threads=threads,
+                train_threads=train_threads,
+                max_time_secs=max_time_secs,
+                train_sample_bytes=train_sample_bytes,
+                compress_jobs=compress_jobs,
+                group_train_dir=group_train,
+            )
+    elif detected == "fastq":
+        click.echo(f"Compressing {input_path.name} (lossless FASTQ CSV)")
+        csv_models = Path(models_dir) if models_dir else DEFAULT_CSV_MODELS_DIR
+        compress_csv_fastq(
+            input_path=input_path,
+            output_path=output_path,
+            models_dir=csv_models,
+            do_train=do_train,
+            no_trained=no_trained,
+            verbose=verbose,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            train_sample_bytes=train_sample_bytes,
+            compress_jobs=compress_jobs,
+            group_train_dir=group_train,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline: schema (train_plain / train_custom)
 # ---------------------------------------------------------------------------
 
 def _compress_trained(
@@ -274,7 +484,7 @@ def _compress_trained(
 
 
 # ---------------------------------------------------------------------------
-# Pipeline: default
+# Pipeline: generic
 # ---------------------------------------------------------------------------
 
 def _compress_default(
@@ -283,7 +493,7 @@ def _compress_default(
     tmpdir: Path,
     verbose: bool,
 ) -> None:
-    """Pipeline for default mode (generic openzl compression)."""
+    """Pipeline for generic mode (generic openzl compression)."""
     with _step_progress("Compressing", "generic profile") as pbar:
         compressed = tmpdir / (input_path.name + ".zl")
         openzl.compress(
@@ -307,7 +517,7 @@ def _compress_default(
 
 
 # ---------------------------------------------------------------------------
-# Pipeline: inline_train
+# Pipeline: inline
 # ---------------------------------------------------------------------------
 
 def _compress_inline(
@@ -319,7 +529,7 @@ def _compress_inline(
     threads: int,
     verbose: bool,
 ) -> None:
-    """Pipeline for inline_train mode."""
+    """Pipeline for inline training mode."""
     if genomic:
         cfg = SCHEMA_REGISTRY[detected]
 

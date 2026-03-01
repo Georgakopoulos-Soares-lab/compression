@@ -4,7 +4,7 @@ Tests are organized in four tiers:
   1. TestCodecRoundTrip  — fasta_codec encode/decode only (no OpenZL needed)
   2. TestStreamInvariants — validate internal consistency of encoded streams
   3. TestZlfastaContainer — .zlfasta container create/extract (pure Python)
-  4. TestFullPipeline    — full compress-lossless/decompress-lossless (requires zli)
+  4. TestFullPipeline    — full compress/decompress pipeline (requires zli)
 """
 
 import hashlib
@@ -701,7 +701,7 @@ class TestFullPipeline:
         # Compress
         result = runner.invoke(
             main,
-            ["compress-lossless", str(fasta_fixture), "-o", str(compressed)],
+            ["compress", str(fasta_fixture), "-o", str(compressed)],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Compress failed:\n{result.output}"
@@ -710,7 +710,7 @@ class TestFullPipeline:
         # Decompress
         result = runner.invoke(
             main,
-            ["decompress-lossless", str(compressed), "-o", str(decompressed), "-f"],
+            ["decompress", str(compressed), "-o", str(decompressed), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
@@ -734,7 +734,7 @@ class TestFullPipeline:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["compress-lossless", str(input_copy)],
+            ["compress", str(input_copy)],
             catch_exceptions=False,
         )
         assert result.exit_code == 0
@@ -753,14 +753,14 @@ class TestFullPipeline:
         # Without -f: should fail
         result = runner.invoke(
             main,
-            ["compress-lossless", str(fixture), "-o", str(output)],
+            ["compress", str(fixture), "-o", str(output)],
         )
         assert result.exit_code != 0
 
         # With -f: should succeed
         result = runner.invoke(
             main,
-            ["compress-lossless", str(fixture), "-o", str(output), "-f"],
+            ["compress", str(fixture), "-o", str(output), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0
@@ -963,7 +963,7 @@ class TestProteinFullPipeline:
         # Compress with --type protein
         result = runner.invoke(
             main,
-            ["compress-lossless", str(protein_fixture), "-o", str(compressed),
+            ["compress", str(protein_fixture), "-o", str(compressed),
              "--type", "protein"],
             catch_exceptions=False,
         )
@@ -973,7 +973,7 @@ class TestProteinFullPipeline:
         # Decompress
         result = runner.invoke(
             main,
-            ["decompress-lossless", str(compressed), "-o", str(decompressed), "-f"],
+            ["decompress", str(compressed), "-o", str(decompressed), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
@@ -995,7 +995,7 @@ class TestProteinFullPipeline:
         # Compress with auto-detect (should detect protein)
         result = runner.invoke(
             main,
-            ["compress-lossless", str(protein_fixture), "-o", str(compressed)],
+            ["compress", str(protein_fixture), "-o", str(compressed)],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Compress failed:\n{result.output}"
@@ -1004,7 +1004,7 @@ class TestProteinFullPipeline:
         # Decompress
         result = runner.invoke(
             main,
-            ["decompress-lossless", str(compressed), "-o", str(decompressed), "-f"],
+            ["decompress", str(compressed), "-o", str(decompressed), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Decompress failed:\n{result.output}"

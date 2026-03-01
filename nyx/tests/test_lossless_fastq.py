@@ -4,7 +4,7 @@ Tests are organized in four tiers:
   1. TestCodecRoundTrip  — fastq_codec encode/decode only (no OpenZL needed)
   2. TestStreamInvariants — validate internal consistency of encoded streams
   3. TestZlfastqContainer — .zlfastq container create/extract (pure Python)
-  4. TestFullPipeline    — full compress/decompress-lossless-fastq (requires zli)
+  4. TestFullPipeline    — full compress/decompress pipeline (requires zli)
 """
 
 import hashlib
@@ -701,7 +701,7 @@ class TestFullPipeline:
 
         result = runner.invoke(
             main,
-            ["compress-lossless-fastq", str(fastq_fixture), "-o", str(compressed)],
+            ["compress", str(fastq_fixture), "-o", str(compressed)],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Compress failed:\n{result.output}"
@@ -709,7 +709,7 @@ class TestFullPipeline:
 
         result = runner.invoke(
             main,
-            ["decompress-lossless-fastq", str(compressed), "-o", str(decompressed), "-f"],
+            ["decompress", str(compressed), "-o", str(decompressed), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
@@ -730,7 +730,7 @@ class TestFullPipeline:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["compress-lossless-fastq", str(input_copy)],
+            ["compress", str(input_copy)],
             catch_exceptions=False,
         )
         assert result.exit_code == 0
@@ -747,13 +747,13 @@ class TestFullPipeline:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["compress-lossless-fastq", str(fixture), "-o", str(output)],
+            ["compress", str(fixture), "-o", str(output)],
         )
         assert result.exit_code != 0
 
         result = runner.invoke(
             main,
-            ["compress-lossless-fastq", str(fixture), "-o", str(output), "-f"],
+            ["compress", str(fixture), "-o", str(output), "-f"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0
@@ -929,51 +929,6 @@ class TestPackedMultiChunk:
 
 
 # =============================================================================
-# Tier 6: Full pipeline with packed format (requires zli)
-# =============================================================================
-
-
-@requires_fastq_codec
-@requires_zli
-class TestFullPipelinePacked:
-    """Test full compress -> decompress pipeline with packed NQF format (--packed flag)."""
-
-    @pytest.fixture(params=FIXTURE_NAMES)
-    def fastq_fixture(self, request):
-        return FIXTURES_DIR / request.param
-
-    def test_roundtrip(self, fastq_fixture, tmp_path):
-        from click.testing import CliRunner
-        from nyx.cli import main
-
-        runner = CliRunner()
-        compressed = tmp_path / "compressed.zlfastq"
-        decompressed = tmp_path / "decompressed.fastq"
-
-        result = runner.invoke(
-            main,
-            ["compress-lossless-fastq", str(fastq_fixture),
-             "-o", str(compressed), "--packed"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 0, f"Compress failed:\n{result.output}"
-        assert compressed.exists()
-
-        result = runner.invoke(
-            main,
-            ["decompress-lossless-fastq", str(compressed),
-             "-o", str(decompressed), "-f"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
-        assert decompressed.exists()
-
-        assert _sha256(fastq_fixture) == _sha256(decompressed), (
-            f"Full pipeline packed roundtrip failed for {fastq_fixture.name}"
-        )
-
-
-# =============================================================================
 # Tier 7: CSV codec roundtrip
 # =============================================================================
 
@@ -1096,7 +1051,7 @@ class TestFullPipelineCSV:
 
         result = runner.invoke(
             main,
-            ["compress-lossless-fastq", str(fastq_fixture),
+            ["compress", str(fastq_fixture),
              "-o", str(compressed)],
             catch_exceptions=False,
         )
@@ -1105,7 +1060,7 @@ class TestFullPipelineCSV:
 
         result = runner.invoke(
             main,
-            ["decompress-lossless-fastq", str(compressed),
+            ["decompress", str(compressed),
              "-o", str(decompressed), "-f"],
             catch_exceptions=False,
         )
@@ -1117,41 +1072,3 @@ class TestFullPipelineCSV:
         )
 
 
-# =============================================================================
-# Tier 9: Legacy and packed modes still work
-# =============================================================================
-
-
-@requires_fastq_codec
-@requires_zli
-class TestLegacyModeStillWorks:
-    """Test that --legacy flag still produces valid output."""
-
-    def test_legacy_roundtrip(self, tmp_path):
-        from click.testing import CliRunner
-        from nyx.cli import main
-
-        fixture = FIXTURES_DIR / "minimal.fastq"
-        runner = CliRunner()
-        compressed = tmp_path / "compressed.zlfastq"
-        decompressed = tmp_path / "decompressed.fastq"
-
-        result = runner.invoke(
-            main,
-            ["compress-lossless-fastq", str(fixture),
-             "-o", str(compressed), "--legacy"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 0, f"Legacy compress failed:\n{result.output}"
-
-        result = runner.invoke(
-            main,
-            ["decompress-lossless-fastq", str(compressed),
-             "-o", str(decompressed), "-f"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 0, f"Legacy decompress failed:\n{result.output}"
-
-        assert _sha256(fixture) == _sha256(decompressed), (
-            "Legacy mode roundtrip failed"
-        )

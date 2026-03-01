@@ -10,10 +10,6 @@ from .commands.benchmark import benchmark_cmd
 from .commands.inspect_cmd import inspect_cmd
 from .commands.list_profiles import list_profiles_cmd
 from .commands.build import build_cmd
-from .commands.compress_lossless import compress_lossless_cmd
-from .commands.decompress_lossless import decompress_lossless_cmd
-from .commands.compress_lossless_fastq import compress_lossless_fastq_cmd
-from .commands.decompress_lossless_fastq import decompress_lossless_fastq_cmd
 
 
 @click.group()
@@ -30,21 +26,23 @@ def main():
 
     Genomic compression toolkit powered by OpenZL.
 
-    Seamless, schema-aware compression for FASTA, FASTQ, and VCF files
-    with preprocessing, training, parallel compression, and archive bundling.
+    Lossless compression for FASTA and FASTQ files, schema-aware
+    compression for genomic formats, and generic compression for any file.
 
     \b
     Quick start:
       pip install -e ./nyx && nyx build
-      nyx compress genome.fasta
-      nyx decompress genome.fasta.nyx
+      nyx compress genome.fasta           # lossless → .zlfasta
+      nyx compress reads.fastq            # lossless → .zlfastq
+      nyx decompress genome.fasta.zlfasta
 
     \b
-    Compression modes:
-      train_plain   Schema-aware (auto-selects schema for genomic files)
-      train_custom  Schema-aware (user provides --sddl schema)
-      default       Generic OpenZL compression (no preprocessing)
-      inline_train  Generic with inline training on input
+    Compression modes (--mode):
+      auto        Auto-select based on file type (default)
+      lossless    Byte-exact lossless (FASTA/FASTQ only)
+      schema      Schema-aware with SDDL (genomic files)
+      generic     Generic OpenZL compression
+      inline      Generic with inline training
     """
 
 
@@ -55,10 +53,6 @@ main.add_command(benchmark_cmd)
 main.add_command(inspect_cmd)
 main.add_command(list_profiles_cmd)
 main.add_command(build_cmd)
-main.add_command(compress_lossless_cmd)
-main.add_command(decompress_lossless_cmd)
-main.add_command(compress_lossless_fastq_cmd)
-main.add_command(decompress_lossless_fastq_cmd)
 
 
 if __name__ == "__main__":

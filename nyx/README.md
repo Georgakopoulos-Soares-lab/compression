@@ -89,13 +89,15 @@ Both `nyx/openzl/` and `nyx/bin/` are gitignored — only source code is tracked
 
 ```bash
 # Lossless compression (auto-detects FASTA/FASTQ, byte-exact reconstruction)
-nyx compress-lossless genome.fasta
-nyx compress-lossless reads.fastq --threads 4
-nyx decompress-lossless genome.fasta.zlfasta
+nyx compress genome.fasta                     # → genome.fasta.zlfasta
+nyx compress reads.fastq                      # → reads.fastq.zlfastq
+nyx decompress genome.fasta.zlfasta           # → genome.fasta (byte-identical)
 
-# Schema-aware compression (training-based, higher ratio but lossy reconstruction)
-nyx compress genome.fasta -o genome.nyx
-nyx decompress genome.nyx -o output/
+# Schema-aware compression (training-based, higher ratio)
+nyx compress genome.fasta --mode schema       # → genome.fasta.nyx
+
+# Generic compression (any file)
+nyx compress data.bin                         # → data.bin.nyx
 
 # Check version
 nyx --version
@@ -103,126 +105,86 @@ nyx --version
 
 ## Commands
 
-### `nyx compress-lossless`
-
-**Unified lossless compression** for FASTA and FASTQ files with byte-exact reconstruction. Auto-detects the input format (or specify with `--type`).
-
-```
-nyx compress-lossless <file> [OPTIONS]
-```
-
-**Options:**
-
-| Flag | Description |
-|------|-------------|
-| `-o, --output PATH` | Output path (default: `<input>.zlfasta` or `.zlfastq`) |
-| `-t, --type TYPE` | Input type: `auto`, `fasta`, or `fastq` (default: auto) |
-| `--threads N` | Number of parallel encoding threads (default: 1) |
-| `--train` | Train per-stream compressors (one-time, improves ratio) |
-| `--models-dir PATH` | Directory for trained compressor models |
-| `--no-trained` | Ignore trained compressors, use generic serial profile |
-| `-v, --verbose` | Print subprocess commands |
-| `-f, --force` | Overwrite existing output |
-
-**Examples:**
-
-```bash
-# Auto-detect FASTA, single-threaded
-nyx compress-lossless genome.fasta
-
-# FASTQ with 4 encoding threads
-nyx compress-lossless reads.fastq --threads 4
-
-# Train per-stream compressors for better ratio (first time only)
-nyx compress-lossless genome.fasta --train
-
-# Explicit type override
-nyx compress-lossless data.fa --type fasta
-```
-
-**How it works:** The input is split into typed binary streams (N-mask, 2-bit bases, ACGT-mask, exceptions, case, wrapping, quality) by a C++ codec, then each stream is independently compressed with OpenZL and bundled into a `.zlfasta` or `.zlfastq` container.
-
-### `nyx decompress-lossless`
-
-**Unified lossless decompression** from `.zlfasta` or `.zlfastq` containers. Auto-detects container type from magic bytes.
-
-```
-nyx decompress-lossless <file> [OPTIONS]
-```
-
-| Flag | Description |
-|------|-------------|
-| `-o, --output PATH` | Output path (default: strip container extension) |
-| `-v, --verbose` | Print subprocess commands |
-| `-f, --force` | Overwrite existing output |
-
-```bash
-nyx decompress-lossless genome.fasta.zlfasta
-nyx decompress-lossless reads.fastq.zlfastq -o reads.fastq
-```
-
-### `nyx compress-lossless-fastq` / `nyx decompress-lossless-fastq`
-
-Format-specific alternatives to the unified commands. Identical behavior but skip auto-detection.
-
 ### `nyx compress`
 
-The primary command. Compresses a file using one of four modes.
+**Unified compression** for all file types. Auto-detects the input format and selects the best pipeline.
 
 ```
 nyx compress <file> [OPTIONS]
 ```
 
+**Auto-routing (--mode auto, default):**
+
+| Input type | Pipeline | Output extension |
+|------------|----------|-----------------|
+| FASTA (nucleotide) | Lossless packed NXF2 | `.zlfasta` |
+| FASTA (protein) | Lossless packed NXFP | `.zlfasta` |
+| FASTQ | Lossless CSV decomposition | `.zlfastq` |
+| Other | Generic OpenZL compression | `.nyx` |
+
+FASTA auto-detects nucleotide vs protein. FASTQ auto-detects Illumina vs generic headers for optimal dictionary encoding.
+
 **Options:**
 
 | Flag | Description |
 |------|-------------|
-| `-o, --output PATH` | Output `.nyx` file path (default: `<input>.nyx`) |
-| `--mode MODE` | Compression mode (see below). Auto-selected if omitted. |
-| `--sddl PATH` | SDDL schema file (required for `train_custom`) |
-| `--type TYPE` | Override auto-detected file type (`fasta`, `fastq`, `vcf`) |
-| `--threads N` | Threads for training/preprocessing (default: CPU count) |
-| `--max-time-secs N` | Training time budget in seconds (default: 1800) |
-| `--compress-jobs N` | Parallel compression jobs (default: 4) |
-| `--target-train-mib N` | Training sample size in MiB (default: 200) |
-| `--trainer ALGO` | Training algorithm: `greedy`, `full-split`, or `bottom-up` (default: greedy) |
-| `--no-clustering` | Skip clustering during training |
-| `--benchmark` | Run competitor benchmarks (gzip, pigz, zstd) and print comparison table |
+| `-o, --output PATH` | Output file path (auto-determined by pipeline) |
+| `-t, --type TYPE` | File type: `auto`, `fasta`, `protein`, `fastq`, `vcf`, `generic` (default: auto) |
+| `--mode MODE` | Compression mode: `auto`, `lossless`, `schema`, `generic`, `inline` (default: auto) |
+| `--train` | Train compressors before compressing (improves ratio) |
+| `--models-dir PATH` | Directory for trained compressor models |
+| `--no-trained` | Ignore trained compressors, use generic profile |
+| `--group-train DIR` | Train from directory of sample files |
+| `--sddl PATH` | Custom SDDL schema (forces schema mode) |
+| `--threads N` | Encoding/preprocessing threads (default: 1) |
+| `--train-threads N` | OpenZL training threads (default: CPU count) |
+| `--max-time-secs N` | Training time limit in seconds (default: 1800) |
+| `--compress-jobs N` | Parallel compression jobs (default: CPU count) |
+| `--train-sample-mib N` | Training sample size in MiB (default: 200) |
+| `--trainer ALGO` | Training algorithm: `greedy`, `full-split`, or `bottom-up` (schema mode) |
+| `--no-clustering` | Skip clustering during training (schema mode) |
+| `--benchmark` | Run competitor benchmarks (gzip, pigz, zstd) |
 | `--keep-temp` | Keep temporary directories for debugging |
-| `-v, --verbose` | Show subprocess commands |
+| `-v, --verbose` | Verbose output |
 | `-f, --force` | Overwrite existing output |
 
 **Compression Modes:**
 
 | Mode | When to use | What it does |
 |------|-------------|--------------|
-| `train_plain` | Genomic files (FASTA, FASTQ, VCF) | Auto-selects SDDL schema from registry. Preprocesses, trains, compresses. Best compression ratio. |
-| `train_custom` | Any file with a custom schema | You provide `--sddl`. Preprocesses, trains, compresses. |
-| `default` | Generic files, quick compression | Uses OpenZL's generic `serial` profile. No preprocessing. |
-| `inline_train` | Moderate compression without separate training | OpenZL trains inline on the input file. |
-
-If `--mode` is omitted, Nyx picks `train_plain` for recognized genomic files and `default` otherwise.
+| `auto` | Default — picks the best mode automatically | Lossless for FASTA/FASTQ, schema for VCF, generic for other |
+| `lossless` | FASTA/FASTQ — byte-exact reconstruction | C++ codec → binary streams → OpenZL → `.zlfasta`/`.zlfastq` |
+| `schema` | Genomic files with SDDL schemas | Preprocessor → SDDL training → parallel compression → `.nyx` |
+| `generic` | Any file, quick compression | OpenZL's generic `serial` profile → `.nyx` |
+| `inline` | Moderate compression without separate training | OpenZL inline training → `.nyx` |
 
 **Examples:**
 
 ```bash
-# Schema-aware FASTA compression (best ratio)
-nyx compress reference_genome.fna
+# Auto-detect FASTA → lossless compression
+nyx compress genome.fasta
 
-# Same but with custom training parameters
-nyx compress reference_genome.fna --threads 16 --max-time-secs 3600
+# Protein FASTA (auto-detected or explicit)
+nyx compress proteins.fasta                         # auto-detects protein
+nyx compress proteins.fasta --type protein          # explicit
 
-# Custom schema
-nyx compress data.bin --mode train_custom --sddl my_format.sddl
+# FASTQ with training (improves ratio)
+nyx compress reads.fastq --train
 
-# Generic compression (fast, no training)
-nyx compress arbitrary_file.dat --mode default
+# Schema-aware compression
+nyx compress genome.fasta --mode schema
 
-# Inline training (moderate ratio, no separate training step)
-nyx compress genome.fasta --mode inline_train
+# Custom SDDL schema
+nyx compress data.bin --sddl my_format.sddl
+
+# Generic compression (fast, no preprocessing)
+nyx compress arbitrary_file.dat --mode generic
 
 # Compress and benchmark against gzip, pigz, zstd
 nyx compress genome.fasta --benchmark
+
+# Group training from multiple files
+nyx compress genome.fasta --train --group-train /path/to/samples/
 ```
 
 ### Benchmarking Competitors
@@ -263,19 +225,34 @@ sudo apt install pigz zstd
 
 ### `nyx decompress`
 
-Extracts and decompresses a `.nyx` archive.
+**Unified decompression** for all Nyx archives. Auto-detects container format from magic bytes.
 
 ```
-nyx decompress <file.nyx> [OPTIONS]
+nyx decompress <file> [OPTIONS]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `-o, --output PATH` | Output directory (default: `<input>_decompressed/`) |
-| `-f, --force` | Overwrite existing output |
+| `-o, --output PATH` | Output file/directory path (auto-determined) |
 | `-v, --verbose` | Verbose output |
+| `-f, --force` | Overwrite existing output |
+| `--keep-temp` | Keep temporary directories |
 
-> **Note:** Decompression currently outputs binary chunks. Postprocessing (binary chunks back to original text format) will be added in a future release.
+**Auto-detection:**
+
+| Container | Magic bytes | Output |
+|-----------|------------|--------|
+| `.zlfasta` | `ZLFASTA\0` | Byte-identical FASTA file |
+| `.zlfastq` | `ZLFASTQ\0` | Byte-identical FASTQ file |
+| `.nyx` | tar archive | Decompressed binary chunks |
+
+```bash
+nyx decompress genome.fasta.zlfasta                # → genome.fasta
+nyx decompress reads.fastq.zlfastq -o reads.fastq  # → reads.fastq
+nyx decompress data.nyx                            # → data_decompressed/
+```
+
+> **Note:** `.nyx` decompression currently outputs binary chunks. Postprocessing (binary chunks back to original text format) will be added in a future release.
 
 ### `nyx train`
 
@@ -331,34 +308,46 @@ All compression operations display tqdm progress bars:
 
 ## Architecture
 
+**Lossless pipeline (FASTA/FASTQ, default):**
+
 ```
 nyx compress genome.fasta
     |
     v
-[detect file type] --> "fasta"
+[detect file type] --> "fasta" (nucleotide)
     |
     v
-[create training sample] --> ~200 MiB record-safe subset
+[encode packed] --> NXF2 binary chunks (C++ fasta_codec)
     |
     v
-[preprocess] --> binary chunks (FAV4 format, 4-bit packed bases)
+[compress chunks] --> .zl files (parallel, OpenZL SDDL compressor)
+    |
+    v
+[bundle container] --> genome.fasta.zlfasta
+```
+
+**Schema pipeline (--mode schema):**
+
+```
+nyx compress genome.fasta --mode schema
+    |
+    v
+[detect + preprocess] --> binary chunks (FAV4 format)
     |
     v
 [train compressor] --> trained model (via zli train + SDDL schema)
     |
     v
-[preprocess full file] --> binary chunks
-    |
-    v
-[compress chunks] --> .zl files (parallel, configurable jobs)
+[compress chunks] --> .zl files (parallel)
     |
     v
 [bundle archive] --> genome.fasta.nyx (tar: manifest + compressor + chunks)
 ```
 
-Nyx is an **orchestrator**. All heavy computation runs in C++ via two binaries:
+Nyx is an **orchestrator**. All heavy computation runs in C++ via:
 - `zli` — OpenZL's CLI for training, compression, and decompression
-- `genomic_preprocessor` — converts text genomic formats to binary chunk format
+- `fasta_codec` / `fastq_codec` — lossless binary stream codecs
+- `genomic_preprocessor` — converts text genomic formats to binary chunk format (schema pipeline)
 
 ## .nyx Archive Format
 
@@ -381,12 +370,12 @@ tar tf genome.fasta.nyx
 
 ## Supported File Types
 
-| Format | Detection | Preprocessing | Schema |
-|--------|-----------|---------------|--------|
-| FASTA (.fasta, .fa, .fna) | Content (`>`) + extension | 4-bit packed (FAV4) | `fasta_packed.sddl` |
-| FASTQ (.fastq, .fq) | Content (`@...+`) + extension | Header dedup + 4-bit (FQV4) | Coming soon |
-| VCF (.vcf) | Content (`##fileformat=VCF`) | Structured columns (VCF3) | Coming soon |
-| Generic (any other) | Fallback | None | Uses `serial` profile |
+| Format | Detection | Default mode | Container |
+|--------|-----------|-------------|-----------|
+| FASTA (.fasta, .fa, .fna) | Content (`>`) + extension | Lossless (NXF2/NXFP packed) | `.zlfasta` |
+| FASTQ (.fastq, .fq) | Content (`@...+`) + extension | Lossless (CSV decomposition) | `.zlfastq` |
+| VCF (.vcf) | Content (`##fileformat=VCF`) | Schema (if SDDL available) | `.nyx` |
+| Generic (any other) | Fallback | Generic serial | `.nyx` |
 
 ## Adding a New File Type
 
@@ -423,22 +412,19 @@ nyx/
 ├── models/                     # Trained per-stream compressor models
 │   ├── lossless/               # FASTA stream compressors
 │   └── lossless_fastq/         # FASTQ stream compressors
-├── tests/                      # Pytest test suite (121 tests)
+├── tests/                      # Pytest test suite (268 tests)
 │   ├── __init__.py
-│   ├── test_lossless.py        # FASTA round-trip tests (60 tests)
-│   ├── test_lossless_fastq.py  # FASTQ round-trip tests (61 tests)
+│   ├── test_lossless.py        # FASTA round-trip tests
+│   ├── test_lossless_fastq.py  # FASTQ round-trip tests
 │   └── fixtures/               # Test FASTA/FASTQ input files
 ├── openzl/                     # [gitignored] OpenZL source + built binary
 ├── bin/                        # [gitignored] Compiled binaries (codecs + preprocessor)
 └── nyx/                        # Python package
     ├── cli.py                  # CLI entry point
     ├── commands/               # Click command implementations
-    │   ├── compress.py         # nyx compress (schema-aware)
-    │   ├── compress_lossless.py        # nyx compress-lossless (unified auto-detect)
-    │   ├── compress_lossless_fastq.py  # nyx compress-lossless-fastq (explicit)
-    │   ├── decompress.py               # nyx decompress (schema-aware)
-    │   ├── decompress_lossless.py      # nyx decompress-lossless (unified auto-detect)
-    │   ├── decompress_lossless_fastq.py # nyx decompress-lossless-fastq (explicit)
+    │   ├── compress.py         # nyx compress (unified — all pipelines)
+    │   ├── decompress.py       # nyx decompress (unified — all formats)
+    │   ├── _lossless.py        # Internal lossless pipeline functions
     │   ├── train.py
     │   ├── benchmark.py
     │   ├── inspect_cmd.py
@@ -465,8 +451,8 @@ nyx/
 **"Cannot find zli binary"**
 Run `nyx build` to compile OpenZL from source. Requires git, make, and a C++17 compiler.
 
-**"No SDDL schema available yet for 'fastq'"**
-FASTQ and VCF schemas are not yet created. Use `--mode train_custom --sddl <path>` with your own schema, or `--mode default` for generic compression.
+**"No SDDL schema available for 'fastq'"**
+FASTQ and VCF schemas are not yet created for the schema pipeline. Use `--sddl <path>` with your own schema, or `--mode generic` for generic compression. Note: FASTQ lossless compression (the default) does not require an SDDL schema.
 
 **Build fails on macOS**
 Ensure Xcode command line tools are installed: `xcode-select --install`
