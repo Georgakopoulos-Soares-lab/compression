@@ -1,5 +1,7 @@
 """nyx decompress-lossless — Unified lossless decompression from .zlfasta/.zlfastq containers."""
 
+import concurrent.futures
+import os
 import re
 import shutil
 import tempfile
@@ -18,6 +20,7 @@ _ZLFASTQ_MAGIC = b"ZLFASTQ\x00"
 
 # Streams per format that were compressed (need decompression)
 _FASTA_COMPRESSIBLE = {
+    "meta.bin",
     "headers.bin",
     "nmask.bin",
     "acgtmask.bin",
@@ -76,6 +79,23 @@ def _is_compressible(name: str, compressible: set, is_fastq: bool = False) -> bo
         if m and _QUALITY_POS_PATTERN.match(m.group(1)):
             return True
     return False
+
+
+def _decompress_one(name, extracted_path, decompressed_path, verbose):
+    """Decompress a single stream. Returns (name, success, fallback)."""
+    try:
+        openzl.decompress(
+            extracted_path, decompressed_path,
+            force=True,
+            verbose=verbose,
+        )
+        return (name, True, False)
+    except openzl.OpenZLError:
+        if name == "meta.bin":
+            # Backward compat: old v1 archives have raw meta.bin
+            shutil.copy2(extracted_path, decompressed_path)
+            return (name, True, True)
+        raise
 
 
 @click.command("decompress-lossless")
@@ -147,26 +167,37 @@ def decompress_lossless_cmd(input_file, output, verbose, force):
             for name, path in sorted(entries.items()):
                 click.echo(f"    {name}: {path.stat().st_size:,} bytes")
 
-        # Step 2: Decompress streams
+        # Step 2: Decompress streams (parallel)
         click.echo("  [2/3] Decompressing streams with OpenZL...")
+
+        decompress_tasks = []
+        copy_tasks = []
         for name, extracted_path in sorted(entries.items()):
             if _is_compressible(name, compressible, is_fastq=is_fastq) and extracted_path.stat().st_size > 0:
-                decompressed_path = decomp_dir / name
-                try:
-                    openzl.decompress(
-                        extracted_path, decompressed_path,
-                        force=True,
-                        verbose=verbose,
-                    )
-                except openzl.OpenZLError:
-                    if name == "meta.bin":
-                        # Backward compat: old v1 archives have raw meta.bin
-                        shutil.copy2(extracted_path, decompressed_path)
-                    else:
-                        raise
+                decompress_tasks.append((name, extracted_path, decomp_dir / name))
             else:
-                dest = decomp_dir / name
-                shutil.copy2(extracted_path, dest)
+                copy_tasks.append((extracted_path, decomp_dir / name))
+
+        # Copy non-compressed entries directly
+        for src, dst in copy_tasks:
+            shutil.copy2(src, dst)
+
+        # Decompress in parallel
+        if decompress_tasks:
+            num_workers = min(os.cpu_count() or 4, len(decompress_tasks))
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers
+            ) as executor:
+                futures = {}
+                for name, extracted_path, decompressed_path in decompress_tasks:
+                    fut = executor.submit(
+                        _decompress_one,
+                        name, extracted_path, decompressed_path, verbose,
+                    )
+                    futures[fut] = name
+
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()  # raises on error
 
         # Step 2b: Reassemble chunked streams
         chunk_groups = {}

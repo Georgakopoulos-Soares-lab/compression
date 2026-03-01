@@ -130,8 +130,8 @@ Decompression reverses the pipeline: extract container → decompress streams �
 | `nyx decompress` | `<file.nyx> [-o PATH] [-f] [--keep-temp] [-v]` | Extracts `.nyx` archive, decompresses all chunks via `zli decompress` | `nyx/nyx/commands/decompress.py:decompress_cmd` |
 | `nyx compress-lossless` | `<file> [-o PATH] [-t TYPE] [--threads N] [--train] [--models-dir PATH] [--no-trained] [-v] [-f]` | **Unified lossless compression.** Auto-detects FASTA/FASTQ, encodes into typed binary streams, compresses each with OpenZL, bundles into `.zlfasta`/`.zlfastq`. Byte-exact reconstruction. | `nyx/nyx/commands/compress_lossless.py:compress_lossless_cmd` |
 | `nyx decompress-lossless` | `<file> [-o PATH] [-v] [-f]` | **Unified lossless decompression.** Auto-detects container type from magic bytes (`ZLFASTA\0`/`ZLFASTQ\0`), decompresses streams, reconstructs original file. | `nyx/nyx/commands/decompress_lossless.py:decompress_lossless_cmd` |
-| `nyx compress-lossless-fastq` | `<file> [-o PATH] [--threads N] [--train] [--models-dir PATH] [--no-trained] [-v] [-f]` | Format-specific FASTQ lossless compression (skips auto-detection). | `nyx/nyx/commands/compress_lossless_fastq.py` |
-| `nyx decompress-lossless-fastq` | `<file> [-o PATH] [-v] [-f]` | Format-specific FASTQ lossless decompression (skips auto-detection). | `nyx/nyx/commands/decompress_lossless_fastq.py` |
+| `nyx compress-lossless-fastq` | `<file> [-o PATH] [--train] [--models-dir PATH] [--no-trained] [--train-sample-mib N] [--max-time-secs N] [--train-threads N] [--compress-jobs N] [-v] [-f]` | Format-specific FASTQ lossless compression. Illumina headers auto-detected and dictionary-encoded. Parallel stream compression. Trained models reusable across all FASTQ files. | `nyx/nyx/commands/compress_lossless_fastq.py` |
+| `nyx decompress-lossless-fastq` | `<file> [-o PATH] [-v] [-f]` | Format-specific FASTQ lossless decompression. Parallel stream decompression. Supports v1/v2/v3 archives. | `nyx/nyx/commands/decompress_lossless_fastq.py` |
 | `nyx train` | `<sample_dir> -o PATH [-p PROFILE] [--profile-arg PATH] [-c COMPRESSOR] [--threads N] [--max-time-secs N] [--use-all-samples] [--no-ace-successors] [--no-clustering] [--trainer ALGO] [-f] [-v]` | Direct passthrough to `zli train`. Unknown flags forwarded to zli. | `nyx/nyx/commands/train.py:train_cmd` |
 | `nyx benchmark` | `<input_dir> [-v]` | Direct passthrough to `zli benchmark`. Unknown flags forwarded. | `nyx/nyx/commands/benchmark.py:benchmark_cmd` |
 | `nyx inspect` | `<compressor_file> [-v]` | Inspect a trained compressor (JSON output). Passthrough to `zli inspect`. | `nyx/nyx/commands/inspect_cmd.py:inspect_cmd` |
@@ -373,13 +373,36 @@ input.fasta
 #### 5.6.3 FASTQ Codec: `nyx/tools/fastq_codec.cpp`
 
 - **Purpose:** Lossless FASTQ ↔ binary stream encoding/decoding with parallel encoding support.
-- **Size:** ~570 lines (down from 1317 after extracting shared code)
+- **Size:** ~1200 lines
+- **Format version:** v3 (backward-compatible decoder for v1, v2, v3)
 - **Metadata magic:** `0x4E584651` ("NXFQ")
 - **Record metadata (48 bytes):** All FASTA fields + plus-line offset/length, quality offset/length, quality encoding type, seq/qual wrapping info
-- **Quality encoding:** Two modes per record:
-  - `QUAL_RAW` (0): Raw quality bytes stored as-is
-  - `QUAL_DELTA` (1): Delta encoding (diff mod 256) — selected when unique byte count ≤ threshold
-- **Additional streams (vs FASTA):** `plus.bin`, `seq_wrap.bin`, `qual_wrap.bin`, `quality.bin`
+
+- **v3 meta header layout:**
+  - `[0-3]`: magic "NXFQ"
+  - `[4-7]`: version (3)
+  - `[8-11]`: num_records
+  - `[12]`: newline_style (0=LF, 1=CRLF)
+  - `[13]`: has_trailing_nl
+  - `[14]`: quality_layout (0=per-record, 1=columnar, 2=per-position+delta, 3=per-position+raw)
+  - `[15]`: header_mode (0=LCP, 1=Illumina)
+  - `[16-19]`: fixed_seq_len
+  - `[20-23]`: prefix_len (LCP mode) or illumina_block_size (Illumina mode)
+  - `[24..]`: LCP prefix bytes or Illumina dictionary block
+
+- **Header modes:**
+  - `LCP (header_mode=0)`: Common prefix stripped from all headers, stored once. Suffixes in `headers.bin`. `@` symbol stripped in v3 (prepended on decode).
+  - `Illumina (header_mode=1)`: Auto-detected when all headers match `@PREFIX.READNUM INSTRUMENT:RUN:FLOWCELL:LANE:TILE:X:Y` (7 colon-separated fields). Dictionary encoding for low-cardinality fields (run, flowcell, lane, tile → u8 indices). Sequential read numbers dropped (reconstructed 1..N on decode). `@` stripped. ~4.4x header size reduction before compression.
+
+- **Illumina dictionary block:** flags byte + constant prefix + constant instrument + sorted dictionaries for run/flowcell/lane/tile + per-record binary (4 dict indices + variable-length X/Y coordinates).
+
+- **Fallback:** If any header in the first batch fails Illumina parsing, the entire file falls back to LCP mode. No data loss, no format change.
+
+- **Quality encoding:** Raw (v2/v3 always use `quality_mode=0`). Per-position quality files (`quality_pos_XXXX.bin`) for fixed-length reads ≤1000bp.
+
+- **Threading:** Atomic work-stealing (`std::atomic<u32>` with `fetch_add`) for balanced load across encoding threads.
+
+- **Additional streams (vs FASTA):** `plus.bin`, `seq_wrap.bin`, `qual_wrap.bin`, `quality.bin` (or `quality_pos_*.bin`)
 - **CLI:** `fastq_codec encode|decode|validate <args> [num_threads]`
 
 ### 5.7 Lossless Stream Encoding — Detailed Algorithm

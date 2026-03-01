@@ -27,6 +27,8 @@ FIXTURE_NAMES = [
     "edge_cases.fastq",
     "crlf.fastq",
     "no_trailing_newline.fastq",
+    "illumina_reads.fastq",
+    "illumina_multi_instrument.fastq",
 ]
 
 
@@ -119,7 +121,7 @@ def validate_fastq_streams(streams_dir: Path) -> list:
     newline_style = meta[12]
     has_trailing_nl = meta[13]
 
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         errors.append(f"Unsupported version: {version}")
     if newline_style not in (0, 1):
         errors.append(f"Invalid newline_style: {newline_style}")
@@ -127,24 +129,54 @@ def validate_fastq_streams(streams_dir: Path) -> list:
         errors.append(f"Invalid has_trailing_newline: {has_trailing_nl}")
 
     # Compute global header size based on version
-    if version == 2:
+    meta_mode = 0  # META_FULL
+    wrap_mode = 0  # WRAPMODE_PER_RECORD (default for v1/v2)
+    if version in (2, 3):
         quality_layout = meta[14]
-        # reserved = meta[15]
+        mode_byte = meta[15]
+        # v3: byte [15] packs (meta_mode << 4) | header_mode
+        header_mode = mode_byte & 0x0F
+        meta_mode = (mode_byte >> 4) & 0x0F
         fixed_seq_len = struct.unpack_from("<I", meta, 16)[0]
-        prefix_len = struct.unpack_from("<I", meta, 20)[0]
-        GLOBAL_HEADER_SIZE = 24 + prefix_len
         if quality_layout not in (0, 1, 2, 3):
             errors.append(f"Invalid quality_layout: {quality_layout}")
+
+        if header_mode == 0:  # LCP mode
+            prefix_len = struct.unpack_from("<I", meta, 20)[0]
+            GLOBAL_HEADER_SIZE = 24 + prefix_len
+        elif header_mode == 1:  # Illumina mode
+            illumina_block_size = struct.unpack_from("<I", meta, 20)[0]
+            GLOBAL_HEADER_SIZE = 24 + illumina_block_size
+        else:
+            errors.append(f"Invalid header_mode: {header_mode}")
+            GLOBAL_HEADER_SIZE = 24
+
+        # Parse wrap_mode (v3+)
+        if version >= 3 and len(meta) > GLOBAL_HEADER_SIZE:
+            wrap_mode = meta[GLOBAL_HEADER_SIZE]
+            GLOBAL_HEADER_SIZE += 1  # wrap_mode byte
+            if wrap_mode == 1:  # WRAPMODE_CONSTANT
+                # Skip constant wrapping data: u32 sw_len + sw_data + u32 qw_len + qw_data
+                if GLOBAL_HEADER_SIZE + 4 <= len(meta):
+                    sw_len = struct.unpack_from("<I", meta, GLOBAL_HEADER_SIZE)[0]
+                    GLOBAL_HEADER_SIZE += 4 + sw_len
+                if GLOBAL_HEADER_SIZE + 4 <= len(meta):
+                    qw_len = struct.unpack_from("<I", meta, GLOBAL_HEADER_SIZE)[0]
+                    GLOBAL_HEADER_SIZE += 4 + qw_len
     else:
         GLOBAL_HEADER_SIZE = 20
         quality_layout = None
 
     RECORD_META_SIZE = 48
-    expected_meta_size = GLOBAL_HEADER_SIZE + num_records * RECORD_META_SIZE
+    if meta_mode == 1:  # META_COMPACT
+        expected_meta_size = GLOBAL_HEADER_SIZE + RECORD_META_SIZE + num_records * 4
+    else:
+        expected_meta_size = GLOBAL_HEADER_SIZE + num_records * RECORD_META_SIZE
     if len(meta) < expected_meta_size:
         errors.append(
             f"meta.bin too small: {len(meta)} bytes, "
-            f"expected >= {expected_meta_size} for {num_records} records"
+            f"expected >= {expected_meta_size} for {num_records} records "
+            f"(meta_mode={meta_mode})"
         )
         return errors
 
@@ -155,7 +187,7 @@ def validate_fastq_streams(streams_dir: Path) -> list:
         "qual_wrap.bin",
     ]
     # quality.bin or quality_pos_*.bin depending on layout
-    has_per_position = (version == 2 and quality_layout in (2, 3))
+    has_per_position = (version in (2, 3) and quality_layout in (2, 3))
     if not has_per_position:
         stream_names.append("quality.bin")
 
@@ -188,21 +220,37 @@ def validate_fastq_streams(streams_dir: Path) -> list:
 
     cursors = {name: 0 for name in streams}
 
+    # Pre-parse per-record metas (handle compact mode)
+    if meta_mode == 1 and num_records > 0:  # META_COMPACT
+        tmpl_off = GLOBAL_HEADER_SIZE
+        tmpl_fields = struct.unpack_from("<11I2B2B", meta, tmpl_off)
+        hlen_base = GLOBAL_HEADER_SIZE + RECORD_META_SIZE
+        record_metas = []
+        for r in range(num_records):
+            hl = struct.unpack_from("<I", meta, hlen_base + r * 4)[0]
+            record_metas.append((*tmpl_fields[:1], hl, *tmpl_fields[2:]))
+    else:
+        record_metas = []
+        for r in range(num_records):
+            off = GLOBAL_HEADER_SIZE + r * RECORD_META_SIZE
+            fields = struct.unpack_from("<11I2B2B", meta, off)
+            record_metas.append(fields)
+
     for r in range(num_records):
-        off = GLOBAL_HEADER_SIZE + r * RECORD_META_SIZE
-        seq_len = struct.unpack_from("<I", meta, off)[0]
-        header_len = struct.unpack_from("<I", meta, off + 4)[0]
-        plus_len = struct.unpack_from("<I", meta, off + 8)[0]
-        nmask_bytes = struct.unpack_from("<I", meta, off + 12)[0]
-        acgtmask_bytes = struct.unpack_from("<I", meta, off + 16)[0]
-        bases2_bytes = struct.unpack_from("<I", meta, off + 20)[0]
-        exceptions_bytes = struct.unpack_from("<I", meta, off + 24)[0]
-        case_bytes = struct.unpack_from("<I", meta, off + 28)[0]
-        seq_wrap_bytes = struct.unpack_from("<I", meta, off + 32)[0]
-        qual_wrap_bytes = struct.unpack_from("<I", meta, off + 36)[0]
-        quality_bytes = struct.unpack_from("<I", meta, off + 40)[0]
-        case_mode = meta[off + 44]
-        quality_mode = meta[off + 45]
+        fields = record_metas[r]
+        seq_len = fields[0]
+        header_len = fields[1]
+        plus_len = fields[2]
+        nmask_bytes = fields[3]
+        acgtmask_bytes = fields[4]
+        bases2_bytes = fields[5]
+        exceptions_bytes = fields[6]
+        case_bytes = fields[7]
+        seq_wrap_bytes = fields[8]
+        qual_wrap_bytes = fields[9]
+        quality_bytes = fields[10]
+        case_mode = fields[11]
+        quality_mode = fields[12]
 
         L = seq_len
         pfx = f"record[{r}]"
@@ -345,12 +393,18 @@ def validate_fastq_streams(streams_dir: Path) -> list:
                 errors.append(f"{pfx}: non-empty seq but {label} wrap_bytes=0")
             cursors[wrap_name] += wrap_bytes_val
 
-        _validate_wrapping("seq_wrap.bin", seq_wrap_bytes, "seq")
-        _validate_wrapping("qual_wrap.bin", qual_wrap_bytes, "qual")
+        if wrap_mode == 1:  # WRAPMODE_CONSTANT
+            if seq_wrap_bytes != 0:
+                errors.append(f"{pfx}: constant wrap but seq_wrap_bytes={seq_wrap_bytes}")
+            if qual_wrap_bytes != 0:
+                errors.append(f"{pfx}: constant wrap but qual_wrap_bytes={qual_wrap_bytes}")
+        else:
+            _validate_wrapping("seq_wrap.bin", seq_wrap_bytes, "seq")
+            _validate_wrapping("qual_wrap.bin", qual_wrap_bytes, "qual")
 
         # Quality bytes: per-record layout stores L bytes per record;
         # columnar/per-position layout stores quality separately (validated after loop)
-        if version == 2 and quality_layout in (1, 2, 3):
+        if version in (2, 3) and quality_layout in (1, 2, 3):
             # Columnar/per-position: quality_bytes in meta should still be L
             if quality_bytes != L:
                 errors.append(f"{pfx}: quality_bytes={quality_bytes} != seq_len={L}")
@@ -361,14 +415,14 @@ def validate_fastq_streams(streams_dir: Path) -> list:
             cursors["quality.bin"] += quality_bytes
 
         # Quality mode
-        if version == 2:
+        if version in (2, 3):
             if quality_mode != 0:
-                errors.append(f"{pfx}: v2 expects quality_mode=0 (raw), got {quality_mode}")
+                errors.append(f"{pfx}: v2/v3 expects quality_mode=0 (raw), got {quality_mode}")
         elif quality_mode not in (0, 1):
             errors.append(f"{pfx}: unknown quality_mode={quality_mode}")
 
     # Columnar quality: total size should be num_records * fixed_seq_len
-    if version == 2 and quality_layout == 1:
+    if version in (2, 3) and quality_layout == 1:
         expected_qual_size = num_records * fixed_seq_len
         actual_qual_size = len(streams["quality.bin"])
         if actual_qual_size != expected_qual_size:

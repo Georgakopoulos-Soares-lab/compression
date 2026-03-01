@@ -19,6 +19,7 @@
  */
 
 #include "codec_common.h"
+#include <atomic>
 #include <thread>
 
 // ============================================================================
@@ -31,7 +32,7 @@ static constexpr u32 META_VERSION = 1;
 #pragma pack(push, 1)
 struct RecordMeta {
     u32 seq_len;          // L: total sequence length (chars, no line breaks)
-    u32 header_len;       // header bytes including '>'
+    u32 header_len;       // header bytes (without leading '>')
     u32 nmask_bytes;      // byte size of bit-packed N-mask
     u32 acgtmask_bytes;   // byte size of bit-packed ACGT-mask
     u32 bases2_bytes;     // byte size of 2-bit packed bases
@@ -88,8 +89,8 @@ static u32 parse_batch(const char* data, size_t size, size_t& pos,
 
         FastaRecord rec;
 
-        // Header line
-        size_t hdr_start = pos;
+        // Header line (skip leading '>')
+        size_t hdr_start = pos + 1;
         while (pos < size && data[pos] != '\n' && data[pos] != '\r') pos++;
         rec.header = std::string(data + hdr_start, pos - hdr_start);
         skip_newline(data, size, pos);
@@ -212,14 +213,13 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
             }
         } else {
             int nt = std::min(num_threads, static_cast<int>(batch_count));
+            std::atomic<u32> next_idx{0};
             std::vector<std::thread> threads;
-            u32 chunk = (batch_count + nt - 1) / nt;
             for (int t = 0; t < nt; t++) {
-                u32 lo = t * chunk;
-                u32 hi = std::min(lo + chunk, batch_count);
-                if (lo >= hi) break;
-                threads.emplace_back([&, lo, hi]() {
-                    for (u32 i = lo; i < hi; i++) {
+                threads.emplace_back([&]() {
+                    while (true) {
+                        u32 i = next_idx.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= batch_count) break;
                         encoded[i] = encode_one(records[i]);
                     }
                 });
@@ -317,7 +317,8 @@ static int do_decode(const char* streams_dir, const char* output_path) {
     for (u32 r = 0; r < num_records; r++) {
         const RecordMeta& rm = metas[r];
 
-        // Write header
+        // Write header (prepend '>' stripped during encode)
+        fwrite(">", 1, 1, out);
         fwrite(headers_data.data() + hdr_off, 1, rm.header_len, out);
         fwrite(nl, 1, nl_len, out);
         hdr_off += rm.header_len;

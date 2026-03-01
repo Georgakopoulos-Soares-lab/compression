@@ -1,5 +1,7 @@
 """nyx compress-lossless-fastq — Lossless FASTQ compression using stream separation + OpenZL."""
 
+import concurrent.futures
+import os
 import re
 import shutil
 import tempfile
@@ -42,11 +44,14 @@ def _is_compressible(name: str) -> bool:
 # zli cannot compress files >500 MiB without chunking support.
 _MAX_CHUNK_BYTES = 400 * 1024 * 1024  # 400 MiB
 
-# Max sample size for training
-_MAX_TRAIN_SAMPLE_BYTES = 10 * 1024 * 1024  # 10 MiB
+# Default max sample size for training (200 MiB, matching main_branch approach)
+_DEFAULT_TRAIN_SAMPLE_BYTES = 200 * 1024 * 1024  # 200 MiB
 
 # If generic serial already achieves this ratio, skip training
 _SKIP_TRAIN_RATIO = 100.0
+
+# Default training time limit per stream (seconds)
+_DEFAULT_MAX_TIME_SECS = 1800  # 30 minutes
 
 # Default directory for trained models
 _NYX_ROOT = Path(__file__).resolve().parent.parent.parent  # nyx/nyx/commands -> nyx/
@@ -103,6 +108,9 @@ def _train_stream_compressors(
     stream_files: list,
     models_dir: Path,
     verbose: bool = False,
+    train_threads: int = None,
+    max_time_secs: int = None,
+    train_sample_bytes: int = None,
 ) -> dict:
     """Train per-stream compressors from encoded stream files.
 
@@ -111,6 +119,9 @@ def _train_stream_compressors(
     """
     models_dir.mkdir(parents=True, exist_ok=True)
     compressors = {}
+
+    if train_sample_bytes is None:
+        train_sample_bytes = _DEFAULT_TRAIN_SAMPLE_BYTES
 
     # Separate quality_pos files from regular streams
     quality_pos_files = []
@@ -126,7 +137,10 @@ def _train_stream_compressors(
         if not _is_compressible(sf.name):
             continue
         compressors.update(_train_single_stream(
-            sf, streams_dir, models_dir, verbose=verbose))
+            sf, streams_dir, models_dir, verbose=verbose,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            train_sample_bytes=train_sample_bytes))
 
     # Train ONE universal quality compressor from a representative position file
     if quality_pos_files:
@@ -144,11 +158,11 @@ def _train_stream_compressors(
 
             original_size = representative.stat().st_size
             sample_path = sample_dir / representative.name
-            if original_size > _MAX_TRAIN_SAMPLE_BYTES:
+            if original_size > train_sample_bytes:
                 with open(representative, "rb") as fin:
-                    sample_data = fin.read(_MAX_TRAIN_SAMPLE_BYTES)
+                    sample_data = fin.read(train_sample_bytes)
                 sample_path.write_bytes(sample_data)
-                sample_size = _MAX_TRAIN_SAMPLE_BYTES
+                sample_size = train_sample_bytes
                 if verbose:
                     click.echo(
                         f"    Using {sample_size:,} byte sample "
@@ -181,6 +195,8 @@ def _train_stream_compressors(
                     profile="serial",
                     use_all_samples=True,
                     no_ace_successors=True,
+                    threads=train_threads,
+                    max_time_secs=max_time_secs,
                     force=True,
                     verbose=verbose,
                 )
@@ -208,6 +224,9 @@ def _train_single_stream(
     streams_dir: Path,
     models_dir: Path,
     verbose: bool = False,
+    train_threads: int = None,
+    max_time_secs: int = None,
+    train_sample_bytes: int = None,
 ) -> dict:
     """Train a compressor for a single stream file. Returns {name: path} or {}."""
     name = sf.name
@@ -217,15 +236,18 @@ def _train_single_stream(
             click.echo(f"    {name}: empty, skipping training")
         return {}
 
+    if train_sample_bytes is None:
+        train_sample_bytes = _DEFAULT_TRAIN_SAMPLE_BYTES
+
     sample_dir = streams_dir / f"_train_{name}"
     sample_dir.mkdir(exist_ok=True)
 
     sample_path = sample_dir / name
-    if original_size > _MAX_TRAIN_SAMPLE_BYTES:
+    if original_size > train_sample_bytes:
         with open(sf, "rb") as fin:
-            sample_data = fin.read(_MAX_TRAIN_SAMPLE_BYTES)
+            sample_data = fin.read(train_sample_bytes)
         sample_path.write_bytes(sample_data)
-        sample_size = _MAX_TRAIN_SAMPLE_BYTES
+        sample_size = train_sample_bytes
         if verbose:
             click.echo(
                 f"    {name}: using {sample_size:,} byte "
@@ -268,6 +290,8 @@ def _train_single_stream(
         profile="serial",
         use_all_samples=True,
         no_ace_successors=True,
+        threads=train_threads,
+        max_time_secs=max_time_secs,
         force=True,
         verbose=verbose,
     )
@@ -344,6 +368,12 @@ def _compress_stream(
 @click.option("-v", "--verbose", is_flag=True, help="Print subprocess commands.")
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output file.")
 @click.option(
+    "--threads",
+    type=int,
+    default=1,
+    help="Number of encoding threads for the C++ codec (default: 1).",
+)
+@click.option(
     "--train", "do_train", is_flag=True,
     help="Train per-stream compressors before compressing (one-time, improves ratio).",
 )
@@ -357,22 +387,56 @@ def _compress_stream(
     "--no-trained", is_flag=True,
     help="Ignore trained compressors, use generic serial profile.",
 )
-def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, models_dir, no_trained):
+@click.option(
+    "--train-sample-mib",
+    type=int,
+    default=200,
+    help="Training sample size in MiB (default: 200).",
+)
+@click.option(
+    "--max-time-secs",
+    type=int,
+    default=_DEFAULT_MAX_TIME_SECS,
+    help=f"Max training time per stream in seconds (default: {_DEFAULT_MAX_TIME_SECS}).",
+)
+@click.option(
+    "--train-threads",
+    type=int,
+    default=None,
+    help="Threads for OpenZL training (default: CPU count).",
+)
+@click.option(
+    "--compress-jobs",
+    type=int,
+    default=None,
+    help="Number of streams to compress in parallel (default: CPU count).",
+)
+def compress_lossless_fastq_cmd(input_file, output, verbose, force, threads, do_train, models_dir, no_trained,
+                                 train_sample_mib, max_time_secs, train_threads, compress_jobs):
     """Lossless FASTQ compression with byte-exact reconstruction.
 
     Encodes the input FASTQ into typed streams (N-mask, 2-bit bases,
     ACGT-mask, exceptions, case, quality, wrapping metadata) and compresses
-    each stream independently with OpenZL.
+    each stream independently with OpenZL. Streams are compressed in
+    parallel for performance (configurable via --compress-jobs).
+
+    Illumina-format headers (INSTRUMENT:RUN:FLOWCELL:LANE:TILE:X:Y) are
+    automatically detected and dictionary-encoded for ~4x header size
+    reduction. Sequential read numbers are dropped and reconstructed on
+    decode. Non-Illumina headers fall back to LCP prefix stripping.
 
     Use --train on the first run to train FASTQ-specific compressors.
-    Subsequent runs will automatically use the trained models for
-    better compression ratios.
+    Training samples 200 MiB from each stream and produces reusable models
+    stored in --models-dir. These models work for ALL FASTQ files, not
+    just the one used for training. Subsequent runs automatically reuse
+    the trained models for better compression ratios.
 
     \b
     Example:
       nyx compress-lossless-fastq reads.fastq --train
       nyx compress-lossless-fastq reads.fastq
       nyx compress-lossless-fastq reads.fastq --no-trained
+      nyx compress-lossless-fastq reads.fastq --compress-jobs 8 -v
     """
     input_path = Path(input_file).resolve()
     if output is None:
@@ -385,6 +449,13 @@ def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, mo
             f"Output already exists: {output_path}\n"
             f"Use -f/--force to overwrite."
         )
+
+    # Resolve defaults
+    if train_threads is None:
+        train_threads = os.cpu_count() or 16
+    if compress_jobs is None:
+        compress_jobs = os.cpu_count() or 4
+    train_sample_bytes = train_sample_mib * 1024 * 1024
 
     mdir = Path(models_dir) if models_dir else _DEFAULT_MODELS_DIR
 
@@ -402,7 +473,7 @@ def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, mo
 
         # Step 1: Encode FASTQ into streams
         click.echo("  [1/4] Encoding FASTQ into streams..." if do_train else "  [1/3] Encoding FASTQ into streams...")
-        stream_files = fastq_codec.encode(input_path, streams_dir, verbose=verbose)
+        stream_files = fastq_codec.encode(input_path, streams_dir, verbose=verbose, threads=threads)
 
         if verbose:
             for sf in stream_files:
@@ -414,6 +485,9 @@ def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, mo
             click.echo("  [2/4] Training per-stream compressors...")
             compressors = _train_stream_compressors(
                 streams_dir, stream_files, mdir, verbose=verbose,
+                train_threads=train_threads,
+                max_time_secs=max_time_secs,
+                train_sample_bytes=train_sample_bytes,
             )
             train_elapsed = time.time() - t0
             click.echo(f"    Trained {len(compressors)} compressors in {train_elapsed:.1f}s")
@@ -431,10 +505,13 @@ def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, mo
                     for name in sorted(compressors):
                         click.echo(f"    {name}: {compressors[name]}")
 
-        # Step 3: Compress each stream with OpenZL
+        # Step 3: Compress each stream with OpenZL (parallel)
         step_label = "[3/4]" if do_train else "[2/3]"
         click.echo(f"  {step_label} Compressing streams with OpenZL...")
         entries = {}
+
+        # Build task list for parallel compression
+        compress_tasks = []
         for sf in sorted(stream_files):
             name = sf.name
             original_size = sf.stat().st_size
@@ -443,55 +520,68 @@ def compress_lossless_fastq_cmd(input_file, output, verbose, force, do_train, mo
                 stream_compressor = compressors.get(name)
                 pieces = _split_file(sf, chunks_dir / name, _MAX_CHUNK_BYTES)
 
-                if len(pieces) == 1 and pieces[0][0] == sf:
-                    compressed_file = compressed_dir / (name + ".zl")
-                    mode = _compress_stream(
-                        sf, compressed_file,
+                for chunk_path, piece_size in pieces:
+                    chunk_name = chunk_path.name if len(pieces) > 1 else name
+                    compressed_file = compressed_dir / (chunk_name + ".zl")
+                    compress_tasks.append((
+                        chunk_path, compressed_file, stream_compressor,
+                        piece_size, chunk_name, name, len(pieces),
+                    ))
+            else:
+                data = sf.read_bytes()
+                entries[name] = (data, original_size)
+
+        # Execute compression in parallel
+        if compress_tasks:
+            num_workers = min(compress_jobs, len(compress_tasks))
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers
+            ) as executor:
+                future_to_task = {}
+                for task in compress_tasks:
+                    (chunk_path, compressed_file, stream_compressor,
+                     piece_size, chunk_name, orig_name, num_pieces) = task
+                    fut = executor.submit(
+                        _compress_stream,
+                        chunk_path, compressed_file,
                         compressor=stream_compressor,
                         train_inline=False,
                         verbose=verbose,
                     )
+                    future_to_task[fut] = task
+
+                # Collect results
+                stream_stats = {}
+                for fut in concurrent.futures.as_completed(future_to_task):
+                    task = future_to_task[fut]
+                    (chunk_path, compressed_file, _sc,
+                     piece_size, chunk_name, orig_name, num_pieces) = task
+                    mode = fut.result()
                     compressed_data = compressed_file.read_bytes()
-                    entries[name] = (compressed_data, original_size)
+                    entries[chunk_name] = (compressed_data, piece_size)
 
-                    if verbose:
-                        ratio = original_size / len(compressed_data) if compressed_data else 0
-                        click.echo(
-                            f"    {name}: {original_size:,} -> "
-                            f"{len(compressed_data):,} ({ratio:.2f}x) [{mode}]"
-                        )
-                else:
-                    if verbose:
-                        click.echo(
-                            f"    {name}: {original_size:,} bytes "
-                            f"-> split into {len(pieces)} chunks"
-                        )
-                    total_compressed = 0
-                    modes_seen = set()
-                    for chunk_path, piece_size in pieces:
-                        chunk_name = chunk_path.name
-                        compressed_file = compressed_dir / (chunk_name + ".zl")
-                        mode = _compress_stream(
-                            chunk_path, compressed_file,
-                            compressor=stream_compressor,
-                            train_inline=False,
-                            verbose=verbose,
-                        )
-                        modes_seen.add(mode)
-                        compressed_data = compressed_file.read_bytes()
-                        entries[chunk_name] = (compressed_data, piece_size)
-                        total_compressed += len(compressed_data)
+                    if orig_name not in stream_stats:
+                        stream_stats[orig_name] = [0, 0, set(), num_pieces]
+                    stats = stream_stats[orig_name]
+                    stats[0] += piece_size
+                    stats[1] += len(compressed_data)
+                    stats[2].add(mode)
 
-                    if verbose:
-                        ratio = original_size / total_compressed if total_compressed else 0
-                        mode_str = "/".join(sorted(modes_seen))
+            if verbose:
+                for orig_name in sorted(stream_stats):
+                    total_orig, total_comp, modes, npieces = stream_stats[orig_name]
+                    ratio = total_orig / total_comp if total_comp else 0
+                    mode_str = "/".join(sorted(modes))
+                    if npieces > 1:
                         click.echo(
-                            f"    {name} total: {original_size:,} -> "
-                            f"{total_compressed:,} ({ratio:.2f}x) [{mode_str}]"
+                            f"    {orig_name} total: {total_orig:,} -> "
+                            f"{total_comp:,} ({ratio:.2f}x) [{mode_str}]"
                         )
-            else:
-                data = sf.read_bytes()
-                entries[name] = (data, original_size)
+                    else:
+                        click.echo(
+                            f"    {orig_name}: {total_orig:,} -> "
+                            f"{total_comp:,} ({ratio:.2f}x) [{mode_str}]"
+                        )
 
         # Step 4: Bundle into .zlfastq container
         step_label = "[4/4]" if do_train else "[3/3]"

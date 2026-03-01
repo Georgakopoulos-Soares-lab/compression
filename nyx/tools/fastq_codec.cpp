@@ -1,22 +1,23 @@
 /*
  * fastq_codec.cpp — Lossless FASTQ encoder/decoder for the Nyx compression pipeline.
  *
+ * v3 changes over v2:
+ *   - Illumina header parsing with dictionary encoding (header_mode=1)
+ *   - Sequential read number dropping (reconstructed on decode)
+ *   - '@' stripped from headers (prepended during decode)
+ *   - Atomic work-stealing for parallel encoding
+ *   - Decoder supports v1, v2, and v3 meta formats
+ *
  * v2 changes over v1:
  *   - Extended meta header: stores header LCP prefix, quality layout, fixed seq len
  *   - headers.bin stores suffixes only (common prefix stripped)
  *   - quality.bin may be in columnar layout (position-major) for fixed-length reads
  *   - Quality encoding always raw (no per-record delta) in v2
- *   - Decoder supports both v1 and v2 meta formats
  *
  * Usage:
  *   fastq_codec encode    <input.fastq> <output_dir> [num_threads]
  *   fastq_codec decode    <streams_dir> <output.fastq>
  *   fastq_codec validate  <streams_dir>
- *
- * ENCODE produces 11 stream files in output_dir:
- *   meta.bin, headers.bin, plus.bin, nmask.bin, acgtmask.bin,
- *   bases2.bin, exceptions.bin, case.bin, seq_wrap.bin,
- *   qual_wrap.bin, quality.bin
  *
  * Compile:
  *   g++ -O3 -std=c++17 -pthread -o fastq_codec fastq_codec.cpp
@@ -24,7 +25,12 @@
 
 #include "codec_common.h"
 #include <thread>
+#include <atomic>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <unistd.h>
+#include <cstring>
 
 // ============================================================================
 // Constants
@@ -33,27 +39,42 @@
 static constexpr u32 META_MAGIC   = 0x4E584651; // "NXFQ" little-endian
 static constexpr u32 META_VERSION_V1 = 1;
 static constexpr u32 META_VERSION_V2 = 2;
+static constexpr u32 META_VERSION_V3 = 3;
 
 static constexpr u8 QUAL_RAW   = 0;
 static constexpr u8 QUAL_DELTA = 1;
 
-// v2 quality layout modes
+// v2/v3 quality layout modes
 static constexpr u8 QLAYOUT_PER_RECORD    = 0;
 static constexpr u8 QLAYOUT_COLUMNAR      = 1;  // v2 layout=1: single quality.bin, column-major
-static constexpr u8 QLAYOUT_PER_POSITION  = 2;  // v3 layout=2: per-position files + delta encoding
-static constexpr u8 QLAYOUT_PER_POS_RAW   = 3;  // v3 layout=3: per-position files, raw (no delta)
+static constexpr u8 QLAYOUT_PER_POSITION  = 2;  // layout=2: per-position files + delta encoding
+static constexpr u8 QLAYOUT_PER_POS_RAW   = 3;  // layout=3: per-position files, raw (no delta)
 
 // Max sequence length for columnar/per-position quality (limits file count)
 static constexpr u32 MAX_COLUMNAR_SEQ_LEN = 1000;
 
+// Header encoding modes (v3)
+static constexpr u8 HDRMODE_LCP      = 0;  // LCP prefix stripping (v2 compat)
+static constexpr u8 HDRMODE_ILLUMINA = 1;  // Illumina structured parsing
+
+// Meta encoding modes (v3, packed into upper nibble of byte [15])
+static constexpr u8 META_FULL    = 0;  // 48 bytes/record (default)
+static constexpr u8 META_COMPACT = 1;  // template + u32 header_lens only
+
+// Wrapping modes (v3, stored in meta global header after Illumina/LCP block)
+// When wrapping is constant, seq_wrap.bin and qual_wrap.bin are empty —
+// the wrapping pattern is stored once in the global header.
+static constexpr u8 WRAPMODE_PER_RECORD = 0;  // default, wrapping in per-record files
+static constexpr u8 WRAPMODE_CONSTANT   = 1;  // all records share identical wrapping
+
 // ============================================================================
-// Metadata struct (same layout for v1 and v2 per-record data)
+// Metadata struct (same layout for v1, v2, v3 per-record data)
 // ============================================================================
 
 #pragma pack(push, 1)
 struct FastqRecordMeta {
     u32 seq_len;
-    u32 header_len;        // v2: suffix length (prefix stripped)
+    u32 header_len;        // v2: suffix length; v3 Illumina: compact binary length
     u32 plus_len;
     u32 nmask_bytes;
     u32 acgtmask_bytes;
@@ -64,7 +85,7 @@ struct FastqRecordMeta {
     u32 qual_wrap_bytes;
     u32 quality_bytes;
     u8  case_mode;
-    u8  quality_mode;      // v2: always QUAL_RAW
+    u8  quality_mode;      // v2/v3: always QUAL_RAW
     u8  pad[2];
 };
 #pragma pack(pop)
@@ -76,7 +97,7 @@ static_assert(sizeof(FastqRecordMeta) == 48, "FastqRecordMeta must be 48 bytes")
 // ============================================================================
 
 struct FastqRecord {
-    std::string header;
+    std::string header;    // v3: without leading '@'
     std::string raw_seq;
     std::vector<u32> seq_line_lengths;
     std::string plus_comment;
@@ -103,7 +124,210 @@ struct EncodedRecord {
 };
 
 // ============================================================================
+// Illumina header parsing (v3)
+// ============================================================================
+
+struct ParsedIlluminaHeader {
+    std::string prefix;      // before .READNUM
+    int64_t     read_num;    // the numeric part after prefix.
+    std::string instrument;
+    std::string run;
+    std::string flowcell;
+    std::string lane;
+    std::string tile;
+    std::string x;
+    std::string y;
+    bool        parsed;
+};
+
+// Parse Illumina header format (without leading '@'):
+//   PREFIX.READNUM INSTRUMENT:RUN:FLOWCELL:LANE:TILE:X:Y
+static ParsedIlluminaHeader parse_illumina_header(const std::string& hdr) {
+    ParsedIlluminaHeader h{};
+    h.parsed = false;
+    h.read_num = 0;
+    if (hdr.size() < 3) return h;
+
+    // Find space separating PREFIX.READNUM from INSTRUMENT:...
+    size_t sp = hdr.find(' ');
+    if (sp == std::string::npos || sp < 2) return h;
+
+    // Find dot separating PREFIX from READNUM (search backward from space)
+    size_t dot = std::string::npos;
+    for (size_t i = sp; i > 0; i--) {
+        if (hdr[i - 1] == '.') { dot = i - 1; break; }
+    }
+    if (dot == 0 || dot == std::string::npos) return h;
+
+    h.prefix = hdr.substr(0, dot);
+
+    // Parse read number
+    for (size_t i = dot + 1; i < sp; i++) {
+        if (hdr[i] < '0' || hdr[i] > '9') return h;
+        h.read_num = h.read_num * 10 + (hdr[i] - '0');
+    }
+
+    // Parse colon-separated fields: INSTRUMENT:RUN:FLOWCELL:LANE:TILE:X:Y
+    const char* info = hdr.c_str() + sp + 1;
+    size_t info_len = hdr.size() - sp - 1;
+
+    size_t colons[6];
+    int ncol = 0;
+    for (size_t i = 0; i < info_len && ncol < 6; i++) {
+        if (info[i] == ':') colons[ncol++] = i;
+    }
+    if (ncol < 6) return h;
+
+    h.instrument = std::string(info, colons[0]);
+    h.run        = std::string(info + colons[0] + 1, colons[1] - colons[0] - 1);
+    h.flowcell   = std::string(info + colons[1] + 1, colons[2] - colons[1] - 1);
+    h.lane       = std::string(info + colons[2] + 1, colons[3] - colons[2] - 1);
+    h.tile       = std::string(info + colons[3] + 1, colons[4] - colons[3] - 1);
+    h.x          = std::string(info + colons[4] + 1, colons[5] - colons[4] - 1);
+    h.y          = std::string(info + colons[5] + 1, info_len - colons[5] - 1);
+
+    h.parsed = true;
+    return h;
+}
+
+// ============================================================================
+// Encode context (shared across all records in an encode run)
+// ============================================================================
+
+struct EncodeContext {
+    u8 header_mode;  // HDRMODE_LCP or HDRMODE_ILLUMINA
+    u8 wrap_mode;    // WRAPMODE_PER_RECORD or WRAPMODE_CONSTANT
+    std::string lcp_prefix;  // for LCP mode (already @-stripped)
+    // For Illumina mode:
+    bool instrument_constant;  // true: instrument stored once; false: per-record dict index
+    std::unordered_map<std::string, u8> instrument_map;  // only used when !instrument_constant
+    std::unordered_map<std::string, u8> run_map;
+    std::unordered_map<std::string, u8> fc_map;
+    std::unordered_map<std::string, u8> lane_map;
+    std::unordered_map<std::string, u8> tile_map;
+};
+
+// ============================================================================
+// Illumina meta block: build for writing to meta.bin
+// ============================================================================
+
+struct IlluminaMeta {
+    u8 flags;  // bit 0: read_num_sequential, bit 1: prefix_constant, bit 2: instrument_constant
+    std::string constant_prefix;
+    std::string constant_instrument;  // non-empty only when flags & 0x04
+    std::vector<std::string> instrument_dict;  // non-empty only when !(flags & 0x04)
+    std::vector<std::string> run_dict;
+    std::vector<std::string> fc_dict;
+    std::vector<std::string> lane_dict;
+    std::vector<std::string> tile_dict;
+};
+
+static std::vector<u8> build_illumina_block(const IlluminaMeta& im) {
+    std::vector<u8> block;
+
+    block.push_back(im.flags);
+
+    auto write_str = [&](const std::string& s) {
+        u16 len = static_cast<u16>(s.size());
+        block.push_back(len & 0xFF);
+        block.push_back((len >> 8) & 0xFF);
+        block.insert(block.end(), s.begin(), s.end());
+    };
+
+    write_str(im.constant_prefix);
+    write_str(im.constant_instrument);
+
+    auto write_dict = [&](const std::vector<std::string>& dict) {
+        u16 count = static_cast<u16>(dict.size());
+        block.push_back(count & 0xFF);
+        block.push_back((count >> 8) & 0xFF);
+        for (const auto& s : dict) write_str(s);
+    };
+
+    write_dict(im.instrument_dict);  // empty if instrument_constant
+    write_dict(im.run_dict);
+    write_dict(im.fc_dict);
+    write_dict(im.lane_dict);
+    write_dict(im.tile_dict);
+
+    return block;
+}
+
+static IlluminaMeta read_illumina_block(FILE* fm) {
+    IlluminaMeta im{};
+    im.flags = read_u8(fm);
+
+    auto read_str = [&]() -> std::string {
+        u8 buf[2];
+        read_bytes(fm, buf, 2);
+        u16 len = buf[0] | (buf[1] << 8);
+        std::string s(len, '\0');
+        if (len > 0) read_bytes(fm, &s[0], len);
+        return s;
+    };
+
+    im.constant_prefix = read_str();
+    im.constant_instrument = read_str();
+
+    auto read_dict = [&]() -> std::vector<std::string> {
+        u8 buf[2];
+        read_bytes(fm, buf, 2);
+        u16 count = buf[0] | (buf[1] << 8);
+        std::vector<std::string> dict(count);
+        for (u16 i = 0; i < count; i++) dict[i] = read_str();
+        return dict;
+    };
+
+    im.instrument_dict = read_dict();
+    im.run_dict = read_dict();
+    im.fc_dict = read_dict();
+    im.lane_dict = read_dict();
+    im.tile_dict = read_dict();
+
+    return im;
+}
+
+// Read illumina block from raw meta bytes (for validate)
+static IlluminaMeta read_illumina_block_from_bytes(const u8* data, size_t len) {
+    IlluminaMeta im{};
+    size_t off = 0;
+    if (off >= len) return im;
+    im.flags = data[off++];
+
+    auto read_str = [&]() -> std::string {
+        if (off + 2 > len) return "";
+        u16 slen = data[off] | (data[off + 1] << 8);
+        off += 2;
+        if (off + slen > len) return "";
+        std::string s((const char*)data + off, slen);
+        off += slen;
+        return s;
+    };
+
+    im.constant_prefix = read_str();
+    im.constant_instrument = read_str();
+
+    auto read_dict = [&]() -> std::vector<std::string> {
+        if (off + 2 > len) return {};
+        u16 count = data[off] | (data[off + 1] << 8);
+        off += 2;
+        std::vector<std::string> dict(count);
+        for (u16 i = 0; i < count; i++) dict[i] = read_str();
+        return dict;
+    };
+
+    im.instrument_dict = read_dict();
+    im.run_dict = read_dict();
+    im.fc_dict = read_dict();
+    im.lane_dict = read_dict();
+    im.tile_dict = read_dict();
+
+    return im;
+}
+
+// ============================================================================
 // Parse a batch of FASTQ records from memory-mapped data.
+// v3: '@' is stripped from headers.
 // ============================================================================
 
 static constexpr u32 BATCH_SIZE = 500000;
@@ -118,8 +342,8 @@ static u32 parse_batch(const char* data, size_t size, size_t& pos,
 
         FastqRecord rec;
 
-        // Header line
-        size_t hdr_start = pos;
+        // Header line (skip leading '@')
+        size_t hdr_start = pos + 1;
         while (pos < size && data[pos] != '\n' && data[pos] != '\r') pos++;
         rec.header = std::string(data + hdr_start, pos - hdr_start);
         skip_newline(data, size, pos);
@@ -195,10 +419,10 @@ static u32 check_uniform_seq_len(const std::vector<FastqRecord>& records) {
 
 // ============================================================================
 // Encode a single FASTQ record (thread-safe, no I/O)
-// v2: strips header prefix, always raw quality
+// v3: uses EncodeContext for header mode
 // ============================================================================
 
-static EncodedRecord encode_one(const FastqRecord& rec, const std::string& prefix) {
+static EncodedRecord encode_one(const FastqRecord& rec, const EncodeContext& ctx) {
     EncodedRecord er{};
     const std::string& seq = rec.raw_seq;
     const std::string& qual = rec.raw_qual;
@@ -207,12 +431,34 @@ static EncodedRecord encode_one(const FastqRecord& rec, const std::string& prefi
     er.meta.seq_len = L;
     er.meta.plus_len = static_cast<u32>(rec.plus_comment.size());
 
-    // Header: strip prefix, store suffix only
-    if (!prefix.empty() && rec.header.size() >= prefix.size() &&
-        rec.header.compare(0, prefix.size(), prefix) == 0) {
-        er.header_buf.assign(rec.header.begin() + prefix.size(), rec.header.end());
+    // Header encoding
+    if (ctx.header_mode == HDRMODE_ILLUMINA) {
+        // Parse and encode as compact binary
+        auto illum = parse_illumina_header(rec.header);
+        // [instr_idx(u8, if !instrument_constant)] + run_idx(u8) + fc_idx(u8) + lane_idx(u8) + tile_idx(u8)
+        // + varint(x_int) + varint(y_int)
+        if (!ctx.instrument_constant) {
+            er.header_buf.push_back(ctx.instrument_map.at(illum.instrument));
+        }
+        er.header_buf.push_back(ctx.run_map.at(illum.run));
+        er.header_buf.push_back(ctx.fc_map.at(illum.flowcell));
+        er.header_buf.push_back(ctx.lane_map.at(illum.lane));
+        er.header_buf.push_back(ctx.tile_map.at(illum.tile));
+        // X and Y as varint integers (saves ~8 bytes/record vs u16_len + ascii)
+        u64 x_int = 0, y_int = 0;
+        for (char c : illum.x) x_int = x_int * 10 + (c - '0');
+        for (char c : illum.y) y_int = y_int * 10 + (c - '0');
+        encode_varint(er.header_buf, x_int);
+        encode_varint(er.header_buf, y_int);
     } else {
-        er.header_buf.assign(rec.header.begin(), rec.header.end());
+        // LCP mode: store suffix (@ already stripped by parser)
+        const std::string& prefix = ctx.lcp_prefix;
+        if (!prefix.empty() && rec.header.size() >= prefix.size() &&
+            rec.header.compare(0, prefix.size(), prefix) == 0) {
+            er.header_buf.assign(rec.header.begin() + prefix.size(), rec.header.end());
+        } else {
+            er.header_buf.assign(rec.header.begin(), rec.header.end());
+        }
     }
     er.meta.header_len = static_cast<u32>(er.header_buf.size());
 
@@ -234,15 +480,18 @@ static EncodedRecord encode_one(const FastqRecord& rec, const std::string& prefi
     er.meta.case_bytes       = se.case_bytes;
     er.meta.case_mode        = se.case_mode;
 
-    // Sequence wrapping
-    er.seq_wrap_buf = encode_wrapping(rec.seq_line_lengths, L);
-    er.meta.seq_wrap_bytes = static_cast<u32>(er.seq_wrap_buf.size());
+    // Sequence wrapping (skip if constant — stored once in global header)
+    if (ctx.wrap_mode == WRAPMODE_CONSTANT) {
+        er.meta.seq_wrap_bytes = 0;
+        er.meta.qual_wrap_bytes = 0;
+    } else {
+        er.seq_wrap_buf = encode_wrapping(rec.seq_line_lengths, L);
+        er.meta.seq_wrap_bytes = static_cast<u32>(er.seq_wrap_buf.size());
+        er.qual_wrap_buf = encode_wrapping(rec.qual_line_lengths, L);
+        er.meta.qual_wrap_bytes = static_cast<u32>(er.qual_wrap_buf.size());
+    }
 
-    // Quality wrapping
-    er.qual_wrap_buf = encode_wrapping(rec.qual_line_lengths, L);
-    er.meta.qual_wrap_bytes = static_cast<u32>(er.qual_wrap_buf.size());
-
-    // Quality: always raw in v2 (no delta)
+    // Quality: always raw in v2/v3 (no delta)
     er.meta.quality_mode = QUAL_RAW;
     er.quality_buf.resize(L);
     for (u32 i = 0; i < L; i++) {
@@ -254,7 +503,7 @@ static EncodedRecord encode_one(const FastqRecord& rec, const std::string& prefi
 }
 
 // ============================================================================
-// ENCODE — v2 with prefix stripping and columnar quality
+// ENCODE — v3 with Illumina header parsing, @ stripping, work-stealing
 // ============================================================================
 
 static int do_encode(const char* input_path, const char* output_dir, int num_threads) {
@@ -275,7 +524,7 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
         return f;
     };
 
-    // Parse first batch to determine prefix and uniform length
+    // Parse first batch to determine header mode, prefix, and uniform length
     size_t parse_pos = 0;
     std::vector<FastqRecord> records;
     u32 first_batch_count = parse_batch(mf.data, mf.size, parse_pos, records, BATCH_SIZE);
@@ -284,21 +533,182 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
         return 1;
     }
 
-    // Detect header prefix (LCP)
-    std::string prefix = compute_lcp(records);
-    u32 prefix_len = static_cast<u32>(prefix.size());
+    // --- Illumina header analysis (full pre-scan of all batches) ---
+    EncodeContext ctx{};
+    u8 header_mode = HDRMODE_LCP;
+    IlluminaMeta illumina_meta{};
+
+    bool all_illumina = true;
+    std::string constant_prefix, constant_instrument;
+    bool prefix_constant = true, instrument_constant = true, read_num_sequential = true;
+    std::unordered_set<std::string> instrument_vals, run_vals, fc_vals, lane_vals, tile_vals;
+
+    // Analyze first batch
+    for (size_t i = 0; i < records.size(); i++) {
+        auto illum = parse_illumina_header(records[i].header);
+        if (!illum.parsed) { all_illumina = false; break; }
+
+        if (i == 0) {
+            constant_prefix = illum.prefix;
+            constant_instrument = illum.instrument;
+        } else {
+            if (illum.prefix != constant_prefix) prefix_constant = false;
+            if (illum.instrument != constant_instrument) instrument_constant = false;
+        }
+        if ((int64_t)(i + 1) != illum.read_num) read_num_sequential = false;
+
+        instrument_vals.insert(illum.instrument);
+        run_vals.insert(illum.run);
+        fc_vals.insert(illum.flowcell);
+        lane_vals.insert(illum.lane);
+        tile_vals.insert(illum.tile);
+    }
+
+    // Pre-scan remaining batches for complete dictionary building
+    // We need ALL unique values before we can build dictionaries
+    size_t prescan_pos = parse_pos;  // save position after first batch
+    int64_t prescan_read_num = static_cast<int64_t>(records.size()) + 1;
+    u32 prescan_batches = 0;
+
+    if (all_illumina) {
+        std::vector<FastqRecord> prescan_records;
+        while (true) {
+            u32 bc = parse_batch(mf.data, mf.size, prescan_pos, prescan_records, BATCH_SIZE);
+            if (bc == 0) break;
+            prescan_batches++;
+
+            for (size_t i = 0; i < prescan_records.size(); i++) {
+                auto illum = parse_illumina_header(prescan_records[i].header);
+                if (!illum.parsed) { all_illumina = false; break; }
+                if (illum.prefix != constant_prefix) prefix_constant = false;
+                if (illum.instrument != constant_instrument) instrument_constant = false;
+                if (illum.read_num != prescan_read_num) read_num_sequential = false;
+                prescan_read_num++;
+
+                instrument_vals.insert(illum.instrument);
+                run_vals.insert(illum.run);
+                fc_vals.insert(illum.flowcell);
+                lane_vals.insert(illum.lane);
+                tile_vals.insert(illum.tile);
+            }
+            if (!all_illumina) break;
+        }
+        if (prescan_batches > 0) {
+            fprintf(stderr, "v3 encoder: pre-scanned %u additional batches for dictionary building\n",
+                    prescan_batches);
+        }
+    }
+
+    if (all_illumina && prefix_constant && read_num_sequential &&
+        instrument_vals.size() <= 255 &&
+        run_vals.size() <= 255 && fc_vals.size() <= 255 &&
+        lane_vals.size() <= 255 && tile_vals.size() <= 255) {
+
+        header_mode = HDRMODE_ILLUMINA;
+
+        // Build sorted dictionaries and index maps
+        auto build_dict = [](const std::unordered_set<std::string>& vals)
+            -> std::pair<std::vector<std::string>, std::unordered_map<std::string, u8>> {
+            std::vector<std::string> sv(vals.begin(), vals.end());
+            std::sort(sv.begin(), sv.end());
+            std::unordered_map<std::string, u8> m;
+            for (size_t i = 0; i < sv.size(); i++) m[sv[i]] = static_cast<u8>(i);
+            return {sv, m};
+        };
+
+        auto [run_dict, run_map]   = build_dict(run_vals);
+        auto [fc_dict, fc_map]     = build_dict(fc_vals);
+        auto [lane_dict, lane_map] = build_dict(lane_vals);
+        auto [tile_dict, tile_map] = build_dict(tile_vals);
+
+        ctx.header_mode = HDRMODE_ILLUMINA;
+        ctx.instrument_constant = instrument_constant;
+        ctx.run_map  = std::move(run_map);
+        ctx.fc_map   = std::move(fc_map);
+        ctx.lane_map = std::move(lane_map);
+        ctx.tile_map = std::move(tile_map);
+
+        // flags: bit 0 = read_num_sequential, bit 1 = prefix_constant, bit 2 = instrument_constant
+        illumina_meta.flags = 0x01 | 0x02;  // read_num_seq + prefix_const always set here
+        if (instrument_constant) {
+            illumina_meta.flags |= 0x04;
+            illumina_meta.constant_instrument = constant_instrument;
+            // instrument_dict stays empty
+        } else {
+            // Dictionary-encode instrument
+            auto [instr_dict, instr_map] = build_dict(instrument_vals);
+            ctx.instrument_map = std::move(instr_map);
+            illumina_meta.instrument_dict = std::move(instr_dict);
+            // constant_instrument stays empty
+        }
+        illumina_meta.constant_prefix = constant_prefix;
+        illumina_meta.run_dict  = std::move(run_dict);
+        illumina_meta.fc_dict   = std::move(fc_dict);
+        illumina_meta.lane_dict = std::move(lane_dict);
+        illumina_meta.tile_dict = std::move(tile_dict);
+
+        fprintf(stderr, "v3 encoder: Illumina mode (prefix=%s, instrument=%s%s, "
+                "dicts: instr=%zu run=%zu fc=%zu lane=%zu tile=%zu)\n",
+                constant_prefix.c_str(),
+                instrument_constant ? constant_instrument.c_str() : "dict",
+                instrument_constant ? " [const]" : "",
+                illumina_meta.instrument_dict.size(),
+                illumina_meta.run_dict.size(), illumina_meta.fc_dict.size(),
+                illumina_meta.lane_dict.size(), illumina_meta.tile_dict.size());
+    } else {
+        header_mode = HDRMODE_LCP;
+        ctx.header_mode = HDRMODE_LCP;
+        ctx.lcp_prefix = compute_lcp(records);
+
+        if (all_illumina) {
+            fprintf(stderr, "v3 encoder: Illumina detected but constraints not met "
+                    "(prefix_const=%d, instr_const=%d, seq_readnum=%d, "
+                    "instr=%zu, run=%zu, fc=%zu, lane=%zu, tile=%zu), falling back to LCP\n",
+                    prefix_constant, instrument_constant, read_num_sequential,
+                    instrument_vals.size(), run_vals.size(), fc_vals.size(),
+                    lane_vals.size(), tile_vals.size());
+        }
+    }
+
+    u32 prefix_len = static_cast<u32>(ctx.lcp_prefix.size());
 
     // Detect uniform sequence length for per-position quality
     u32 fixed_seq_len = check_uniform_seq_len(records);
     u8 quality_layout = (fixed_seq_len > 0 && fixed_seq_len <= MAX_COLUMNAR_SEQ_LEN)
                         ? QLAYOUT_PER_POS_RAW : QLAYOUT_PER_RECORD;
 
-    fprintf(stderr, "v2 encoder: prefix_len=%u, quality_layout=%s, fixed_seq_len=%u\n",
-            prefix_len,
+    // Detect constant wrapping: if all records in the first batch have identical
+    // seq and qual wrapping, store once in global header and skip per-record files.
+    u8 wrap_mode = WRAPMODE_PER_RECORD;
+    std::vector<u8> constant_seq_wrap, constant_qual_wrap;
+    if (!records.empty()) {
+        auto first_sw = encode_wrapping(records[0].seq_line_lengths,
+                                        static_cast<u32>(records[0].raw_seq.size()));
+        auto first_qw = encode_wrapping(records[0].qual_line_lengths,
+                                        static_cast<u32>(records[0].raw_seq.size()));
+        bool all_same = true;
+        for (size_t i = 1; i < records.size() && all_same; i++) {
+            auto sw = encode_wrapping(records[i].seq_line_lengths,
+                                      static_cast<u32>(records[i].raw_seq.size()));
+            auto qw = encode_wrapping(records[i].qual_line_lengths,
+                                      static_cast<u32>(records[i].raw_seq.size()));
+            if (sw != first_sw || qw != first_qw) all_same = false;
+        }
+        if (all_same) {
+            wrap_mode = WRAPMODE_CONSTANT;
+            constant_seq_wrap = std::move(first_sw);
+            constant_qual_wrap = std::move(first_qw);
+        }
+    }
+    ctx.wrap_mode = wrap_mode;
+
+    fprintf(stderr, "v3 encoder: header_mode=%s, quality_layout=%s, fixed_seq_len=%u, wrap=%s\n",
+            header_mode == HDRMODE_ILLUMINA ? "illumina" : "lcp",
             quality_layout == QLAYOUT_PER_POS_RAW ? "per-position-raw" :
             quality_layout == QLAYOUT_PER_POSITION ? "per-position-delta" :
             quality_layout == QLAYOUT_COLUMNAR ? "columnar" : "per-record",
-            fixed_seq_len);
+            fixed_seq_len,
+            wrap_mode == WRAPMODE_CONSTANT ? "constant" : "per-record");
 
     // Open output files
     FILE* f_meta       = open_stream("meta.bin");
@@ -316,7 +726,6 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
     std::vector<FILE*> qual_pos_files;
 
     if (quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW) {
-        // Open per-position output files (final names, no temp)
         qual_pos_files.resize(fixed_seq_len);
         for (u32 p = 0; p < fixed_seq_len; p++) {
             char fname[64];
@@ -332,28 +741,61 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
     if (!f_meta || !f_headers || !f_plus || !f_nmask || !f_acgtmask ||
         !f_bases2 || !f_exceptions || !f_case || !f_seq_wrap || !f_qual_wrap) return 1;
 
-    // Write v2 meta global header
-    write_u32(f_meta, META_MAGIC);          // [0-3]
-    write_u32(f_meta, META_VERSION_V2);     // [4-7]
-    write_u32(f_meta, 0);                   // [8-11]  num_records placeholder
-    write_u8(f_meta, newline_style);        // [12]
-    write_u8(f_meta, has_trailing_nl);      // [13]
-    write_u8(f_meta, quality_layout);       // [14]
-    write_u8(f_meta, 0);                    // [15]    reserved
-    write_u32(f_meta, fixed_seq_len);       // [16-19]
-    write_u32(f_meta, prefix_len);          // [20-23]
-    if (prefix_len > 0) {
-        write_bytes(f_meta, prefix.data(), prefix_len); // [24..24+N-1]
+    // Write v3 meta global header
+    // Byte [15] packs: (meta_mode << 4) | header_mode
+    // meta_mode is determined after encoding; written as 0 initially, patched at end
+    write_u32(f_meta, META_MAGIC);           // [0-3]
+    write_u32(f_meta, META_VERSION_V3);      // [4-7]
+    write_u32(f_meta, 0);                    // [8-11]  num_records placeholder
+    write_u8(f_meta, newline_style);         // [12]
+    write_u8(f_meta, has_trailing_nl);       // [13]
+    write_u8(f_meta, quality_layout);        // [14]
+    write_u8(f_meta, header_mode);           // [15]  placeholder, patched at end
+    write_u32(f_meta, fixed_seq_len);        // [16-19]
+
+    if (header_mode == HDRMODE_ILLUMINA) {
+        auto illumina_block = build_illumina_block(illumina_meta);
+        u32 block_size = static_cast<u32>(illumina_block.size());
+        write_u32(f_meta, block_size);       // [20-23]
+        write_bytes(f_meta, illumina_block.data(), illumina_block.size());
+    } else {
+        write_u32(f_meta, prefix_len);       // [20-23]
+        if (prefix_len > 0) {
+            write_bytes(f_meta, ctx.lcp_prefix.data(), prefix_len);
+        }
+    }
+
+    // Write wrap_mode and constant wrapping data (v3)
+    write_u8(f_meta, wrap_mode);
+    if (wrap_mode == WRAPMODE_CONSTANT) {
+        u32 sw_len = static_cast<u32>(constant_seq_wrap.size());
+        u32 qw_len = static_cast<u32>(constant_qual_wrap.size());
+        write_u32(f_meta, sw_len);
+        write_bytes(f_meta, constant_seq_wrap.data(), sw_len);
+        write_u32(f_meta, qw_len);
+        write_bytes(f_meta, constant_qual_wrap.data(), qw_len);
+        fprintf(stderr, "v3 encoder: constant wrapping (%u + %u bytes stored once)\n",
+                sw_len, qw_len);
     }
 
     // Process batches (first batch already parsed)
     u32 total_records = 0;
     u32 batch_num = 0;
     bool first_batch = true;
+    int64_t expected_read_num = 1;  // for Illumina read number verification
+
+    // Compact meta tracking: if all records have identical meta except header_len,
+    // we can store one template + per-record header_lens (4 bytes vs 48 bytes/record)
+    bool compact_possible = true;
+    bool compact_template_set = false;
+    FastqRecordMeta compact_template{};
+    std::vector<u32> header_lens;
+    header_lens.reserve(1000000);
+    long per_record_meta_offset = 0;  // file offset where per-record metas begin
 
     // Delta encoding state for per-position quality (persists across batches)
     std::vector<u8> prev_byte;
-    if (quality_layout == QLAYOUT_PER_POSITION) {  // only for delta mode
+    if (quality_layout == QLAYOUT_PER_POSITION) {
         prev_byte.assign(fixed_seq_len, 0);
     }
 
@@ -378,32 +820,91 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
             }
         }
 
-        // Encode batch (parallel)
+        // Verify constant wrapping in subsequent batches
+        if (wrap_mode == WRAPMODE_CONSTANT && batch_num > 0) {
+            for (u32 i = 0; i < batch_count; i++) {
+                auto sw = encode_wrapping(records[i].seq_line_lengths,
+                                          static_cast<u32>(records[i].raw_seq.size()));
+                auto qw = encode_wrapping(records[i].qual_line_lengths,
+                                          static_cast<u32>(records[i].raw_seq.size()));
+                if (sw != constant_seq_wrap || qw != constant_qual_wrap) {
+                    fprintf(stderr, "Error: record %u has different wrapping than "
+                            "first batch. Cannot use constant wrapping mode.\n",
+                            total_records + i);
+                    return 1;
+                }
+            }
+        }
+
+        // Verify Illumina read numbers in subsequent batches
+        if (header_mode == HDRMODE_ILLUMINA) {
+            for (u32 i = 0; i < batch_count; i++) {
+                auto illum = parse_illumina_header(records[i].header);
+                if (!illum.parsed) {
+                    fprintf(stderr, "Error: record %u: Illumina header parse failed "
+                            "in batch %u\n", total_records + i, batch_num + 1);
+                    return 1;
+                }
+                if (illum.read_num != expected_read_num) {
+                    fprintf(stderr, "Error: record %u: read_num %lld != expected %lld\n",
+                            total_records + i,
+                            (long long)illum.read_num, (long long)expected_read_num);
+                    return 1;
+                }
+                expected_read_num++;
+            }
+        }
+
+        // Encode batch (parallel with work-stealing)
         std::vector<EncodedRecord> encoded(batch_count);
         if (num_threads <= 1 || batch_count <= 1) {
             for (u32 i = 0; i < batch_count; i++) {
-                encoded[i] = encode_one(records[i], prefix);
+                encoded[i] = encode_one(records[i], ctx);
             }
         } else {
             int nt = std::min(num_threads, static_cast<int>(batch_count));
+            std::atomic<u32> next_idx{0};
             std::vector<std::thread> threads;
-            u32 chunk = (batch_count + nt - 1) / nt;
             for (int t = 0; t < nt; t++) {
-                u32 lo = t * chunk;
-                u32 hi = std::min(lo + chunk, batch_count);
-                if (lo >= hi) break;
-                threads.emplace_back([&, lo, hi]() {
-                    for (u32 i = lo; i < hi; i++) {
-                        encoded[i] = encode_one(records[i], prefix);
+                threads.emplace_back([&]() {
+                    while (true) {
+                        u32 i = next_idx.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= batch_count) break;
+                        encoded[i] = encode_one(records[i], ctx);
                     }
                 });
             }
             for (auto& th : threads) th.join();
         }
 
-        // Write batch to streams
+        // Capture file offset for per-record metas (first batch only)
+        if (batch_num == 0 && first_batch) {
+            // Actually set after we exit the first-batch flag below
+        }
+        if (total_records == 0 && per_record_meta_offset == 0) {
+            per_record_meta_offset = ftell(f_meta);
+        }
+
+        // Write batch to streams, track compact meta
         for (u32 i = 0; i < batch_count; i++) {
             const auto& er = encoded[i];
+
+            // Track compact meta eligibility
+            header_lens.push_back(er.meta.header_len);
+            if (compact_possible) {
+                if (!compact_template_set) {
+                    compact_template = er.meta;
+                    compact_template.header_len = 0;
+                    compact_template_set = true;
+                } else {
+                    FastqRecordMeta check = er.meta;
+                    check.header_len = 0;
+                    if (memcmp(&check, &compact_template, sizeof(FastqRecordMeta)) != 0) {
+                        compact_possible = false;
+                    }
+                }
+            }
+
             write_bytes(f_meta, &er.meta, sizeof(FastqRecordMeta));
 
             write_bytes(f_headers,    er.header_buf.data(),    er.header_buf.size());
@@ -419,7 +920,6 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
 
         // Quality routing
         if (quality_layout == QLAYOUT_PER_POSITION) {
-            // Buffer per position with delta encoding, then flush
             std::vector<std::vector<u8>> col_bufs(fixed_seq_len);
             for (u32 p = 0; p < fixed_seq_len; p++) {
                 col_bufs[p].reserve(batch_count);
@@ -437,7 +937,6 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
                 write_bytes(qual_pos_files[p], col_bufs[p].data(), col_bufs[p].size());
             }
         } else if (quality_layout == QLAYOUT_PER_POS_RAW) {
-            // Buffer per position, raw bytes (no delta), then flush
             std::vector<std::vector<u8>> col_bufs(fixed_seq_len);
             for (u32 p = 0; p < fixed_seq_len; p++) {
                 col_bufs[p].reserve(batch_count);
@@ -469,7 +968,6 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
 
     // Finalize quality output
     if (quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW) {
-        // Per-position files are already final — just close them
         for (u32 p = 0; p < fixed_seq_len; p++) {
             fclose(qual_pos_files[p]);
         }
@@ -477,9 +975,33 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
         fclose(f_quality);
     }
 
-    // Seek back and write the actual record count
+    // Determine meta mode
+    u8 meta_mode = META_FULL;
+    if (compact_possible && total_records > 0 && compact_template_set) {
+        meta_mode = META_COMPACT;
+        // Rewrite per-record section as: template(48) + header_lens(4*N)
+        fseek(f_meta, per_record_meta_offset, SEEK_SET);
+        write_bytes(f_meta, &compact_template, sizeof(FastqRecordMeta));
+        write_bytes(f_meta, header_lens.data(), header_lens.size() * sizeof(u32));
+        // Truncate file
+        long end_pos = ftell(f_meta);
+        fflush(f_meta);
+        if (ftruncate(fileno(f_meta), end_pos) != 0) {
+            fprintf(stderr, "Warning: ftruncate failed for meta.bin\n");
+        }
+        fprintf(stderr, "v3 encoder: compact meta (template + %u header_lens, "
+                "%.1f MB vs %.1f MB full)\n",
+                total_records,
+                (48.0 + total_records * 4.0) / (1024 * 1024),
+                (total_records * 48.0) / (1024 * 1024));
+    }
+
+    // Seek back and write the actual record count and meta_mode
     fseek(f_meta, 8, SEEK_SET);
     write_u32(f_meta, total_records);
+    // Patch byte [15] with (meta_mode << 4) | header_mode
+    fseek(f_meta, 15, SEEK_SET);
+    write_u8(f_meta, (meta_mode << 4) | header_mode);
 
     fclose(f_meta); fclose(f_headers); fclose(f_plus);
     fclose(f_nmask); fclose(f_acgtmask); fclose(f_bases2);
@@ -487,25 +1009,36 @@ static int do_encode(const char* input_path, const char* output_dir, int num_thr
     fclose(f_qual_wrap);
 
     fprintf(stderr, "Encoded %u records in %u batch(es) (%d thread%s), "
-            "newline=%s, trailing_nl=%d, prefix=%u bytes, quality=%s\n",
+            "newline=%s, trailing_nl=%d, header=%s, quality=%s, meta=%s\n",
             total_records, batch_num, num_threads,
             num_threads == 1 ? "" : "s",
             newline_style == NL_CRLF ? "CRLF" : "LF", has_trailing_nl,
-            prefix_len,
+            header_mode == HDRMODE_ILLUMINA ? "illumina" : "lcp",
             quality_layout == QLAYOUT_PER_POS_RAW ? "per-position-raw" :
             quality_layout == QLAYOUT_PER_POSITION ? "per-position-delta" :
-            quality_layout == QLAYOUT_COLUMNAR ? "columnar" : "per-record");
+            quality_layout == QLAYOUT_COLUMNAR ? "columnar" : "per-record",
+            meta_mode == META_COMPACT ? "compact" : "full");
     return 0;
 }
 
 // ============================================================================
-// DECODE — supports both v1 and v2 meta formats
+// DECODE — streaming, supports v1, v2, and v3 meta formats
+//
+// Memory strategy:
+//   - Stream files (headers.bin, etc.) are memory-mapped with MADV_SEQUENTIAL.
+//     The OS pages in data as needed and releases pages behind the cursor,
+//     keeping physical RSS low (~100-200 MB) regardless of file size.
+//   - Per-record metas are read from meta.bin in batches (not all at once).
+//   - Per-position quality files are read in batches and transposed on-the-fly,
+//     avoiding the full NxL quality matrix allocation.
 // ============================================================================
+
+static constexpr u32 DECODE_BATCH = 500000;
 
 static int do_decode(const char* streams_dir, const char* output_path) {
     std::string dir(streams_dir);
 
-    // Read meta.bin
+    // ---- Parse meta.bin global header ----
     std::string meta_path = dir + "/meta.bin";
     FILE* fm = fopen(meta_path.c_str(), "rb");
     if (!fm) { fprintf(stderr, "Cannot open %s\n", meta_path.c_str()); return 1; }
@@ -515,7 +1048,7 @@ static int do_decode(const char* streams_dir, const char* output_path) {
         fprintf(stderr, "Bad magic: 0x%08X\n", magic); fclose(fm); return 1;
     }
     u32 version = read_u32(fm);
-    if (version != META_VERSION_V1 && version != META_VERSION_V2) {
+    if (version != META_VERSION_V1 && version != META_VERSION_V2 && version != META_VERSION_V3) {
         fprintf(stderr, "Unsupported version: %u\n", version); fclose(fm); return 1;
     }
 
@@ -523,19 +1056,34 @@ static int do_decode(const char* streams_dir, const char* output_path) {
     u8 newline_style = read_u8(fm);
     u8 has_trailing_nl = read_u8(fm);
 
-    // v2 extended header fields
+    // v2/v3 extended header fields
     u8 quality_layout = QLAYOUT_PER_RECORD;
+    u8 header_mode = HDRMODE_LCP;
+    u8 meta_mode = META_FULL;
     u32 fixed_seq_len = 0;
     std::string prefix;
+    IlluminaMeta illumina_meta{};
 
-    if (version == META_VERSION_V2) {
-        quality_layout = read_u8(fm);       // [14]
-        read_u8(fm);                         // [15] reserved
+    if (version >= META_VERSION_V2) {
+        quality_layout = read_u8(fm);        // [14]
+        u8 mode_byte = read_u8(fm);          // [15]
         fixed_seq_len = read_u32(fm);        // [16-19]
-        u32 prefix_len = read_u32(fm);       // [20-23]
-        if (prefix_len > 0) {
-            prefix.resize(prefix_len);
-            read_bytes(fm, &prefix[0], prefix_len);
+
+        // v3: byte [15] packs (meta_mode << 4) | header_mode
+        header_mode = mode_byte & 0x0F;
+        meta_mode = (mode_byte >> 4) & 0x0F;
+
+        if (version >= META_VERSION_V3 && header_mode == HDRMODE_ILLUMINA) {
+            u32 illumina_block_size = read_u32(fm);  // [20-23]
+            (void)illumina_block_size;
+            illumina_meta = read_illumina_block(fm);
+        } else {
+            header_mode = HDRMODE_LCP;
+            u32 prefix_len = read_u32(fm);   // [20-23]
+            if (prefix_len > 0) {
+                prefix.resize(prefix_len);
+                read_bytes(fm, &prefix[0], prefix_len);
+            }
         }
     } else {
         // v1: skip 6 reserved bytes
@@ -543,211 +1091,357 @@ static int do_decode(const char* streams_dir, const char* output_path) {
         read_bytes(fm, skip_reserved, 6);
     }
 
-    // Read per-record metadata
-    std::vector<FastqRecordMeta> metas(num_records);
-    for (u32 i = 0; i < num_records; i++) {
-        read_bytes(fm, &metas[i], sizeof(FastqRecordMeta));
+    // ---- Read wrap_mode and constant wrapping data (v3) ----
+    u8 wrap_mode = WRAPMODE_PER_RECORD;
+    std::vector<u8> constant_seq_wrap, constant_qual_wrap;
+    if (version >= META_VERSION_V3) {
+        wrap_mode = read_u8(fm);
+        if (wrap_mode == WRAPMODE_CONSTANT) {
+            u32 sw_len = read_u32(fm);
+            constant_seq_wrap.resize(sw_len);
+            read_bytes(fm, constant_seq_wrap.data(), sw_len);
+            u32 qw_len = read_u32(fm);
+            constant_qual_wrap.resize(qw_len);
+            read_bytes(fm, constant_qual_wrap.data(), qw_len);
+            fprintf(stderr, "Decoder: constant wrapping (%u + %u bytes)\n", sw_len, qw_len);
+        }
     }
-    fclose(fm);
 
-    // Read stream files
-    auto headers_data    = read_file_bytes(dir + "/headers.bin");
-    auto plus_data       = read_file_bytes(dir + "/plus.bin");
-    auto nmask_data      = read_file_bytes(dir + "/nmask.bin");
-    auto acgtmask_data   = read_file_bytes(dir + "/acgtmask.bin");
-    auto bases2_data     = read_file_bytes(dir + "/bases2.bin");
-    auto exceptions_data = read_file_bytes(dir + "/exceptions.bin");
-    auto case_data       = read_file_bytes(dir + "/case.bin");
-    auto seq_wrap_data   = read_file_bytes(dir + "/seq_wrap.bin");
-    auto qual_wrap_data  = read_file_bytes(dir + "/qual_wrap.bin");
+    // ---- Compact meta template (read once, reuse per batch) ----
+    FastqRecordMeta compact_template{};
+    if (meta_mode == META_COMPACT && num_records > 0) {
+        read_bytes(fm, &compact_template, sizeof(FastqRecordMeta));
+        fprintf(stderr, "Decoder: compact meta (template + %u header_lens)\n", num_records);
+    }
+    // fm is now positioned at per-record data; keep open for batch reading
 
-    // Quality data: depends on layout
-    std::vector<u8> quality_data;
+    // ---- Memory-map stream files (OS manages paging) ----
+    MappedFile headers_mf, plus_mf, nmask_mf, acgtmask_mf, bases2_mf;
+    MappedFile exceptions_mf, case_mf, seq_wrap_mf, qual_wrap_mf;
 
-    if (version == META_VERSION_V2 &&
+    if (!headers_mf.open((dir + "/headers.bin").c_str())) return 1;
+    if (!plus_mf.open((dir + "/plus.bin").c_str())) return 1;
+    if (!nmask_mf.open((dir + "/nmask.bin").c_str())) return 1;
+    if (!acgtmask_mf.open((dir + "/acgtmask.bin").c_str())) return 1;
+    if (!bases2_mf.open((dir + "/bases2.bin").c_str())) return 1;
+    if (!exceptions_mf.open((dir + "/exceptions.bin").c_str())) return 1;
+    if (!case_mf.open((dir + "/case.bin").c_str())) return 1;
+    // Only mmap wrapping files if not constant mode
+    if (wrap_mode != WRAPMODE_CONSTANT) {
+        if (!seq_wrap_mf.open((dir + "/seq_wrap.bin").c_str())) return 1;
+        if (!qual_wrap_mf.open((dir + "/qual_wrap.bin").c_str())) return 1;
+    }
+
+    // ---- Quality: open per-position file handles OR mmap quality.bin ----
+    bool use_per_position = false;
+    bool use_delta = false;
+    std::vector<FILE*> qual_pos_fps;
+    MappedFile quality_mf;
+
+    if (version >= META_VERSION_V2 &&
         (quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW) &&
         fixed_seq_len > 0 && num_records > 0) {
-        // v3 layout=2/3: read per-position files, transpose to row-major
-        u64 total_quals = (u64)num_records * fixed_seq_len;
-        quality_data.resize(total_quals);
-        bool use_delta = (quality_layout == QLAYOUT_PER_POSITION);
-
-        // Check for per-position files; fall back to quality.bin if not found
+        use_delta = (quality_layout == QLAYOUT_PER_POSITION);
+        // Probe for per-position files
         char fname[64];
         snprintf(fname, sizeof(fname), "quality_pos_0000.bin");
-        std::string probe_path = dir + "/" + fname;
-        FILE* probe = fopen(probe_path.c_str(), "rb");
+        FILE* probe = fopen((dir + "/" + fname).c_str(), "rb");
         if (probe) {
             fclose(probe);
-            // Read per-position files, transpose (and undo delta if layout=2)
+            use_per_position = true;
+            qual_pos_fps.resize(fixed_seq_len, nullptr);
             for (u32 p = 0; p < fixed_seq_len; p++) {
                 snprintf(fname, sizeof(fname), "quality_pos_%04u.bin", p);
-                auto pos_data = read_file_bytes(dir + "/" + fname);
-                if (pos_data.size() != num_records) {
-                    fprintf(stderr, "Warning: %s has %zu bytes, expected %u\n",
-                            fname, pos_data.size(), num_records);
-                }
-                u32 count = std::min((u32)pos_data.size(), num_records);
-                if (use_delta) {
-                    u8 prev = 0;
-                    for (u32 r = 0; r < count; r++) {
-                        u8 val = static_cast<u8>((prev + pos_data[r]) & 0xFF);
-                        prev = val;
-                        quality_data[(u64)r * fixed_seq_len + p] = val;
-                    }
-                } else {
-                    for (u32 r = 0; r < count; r++) {
-                        quality_data[(u64)r * fixed_seq_len + p] = pos_data[r];
-                    }
+                qual_pos_fps[p] = fopen((dir + "/" + fname).c_str(), "rb");
+                if (!qual_pos_fps[p]) {
+                    fprintf(stderr, "Cannot open %s\n", fname);
+                    // Cleanup
+                    for (auto fp : qual_pos_fps) if (fp) fclose(fp);
+                    fclose(fm);
+                    return 1;
                 }
             }
         } else {
-            // Backward compat: fall back to quality.bin with columnar layout
+            // Fall back to quality.bin (columnar in single file)
+            if (!quality_mf.open((dir + "/quality.bin").c_str())) {
+                fclose(fm); return 1;
+            }
             fprintf(stderr, "Note: per-position files not found, falling back to quality.bin\n");
-            quality_data = read_file_bytes(dir + "/quality.bin");
-            u64 expected = (u64)num_records * fixed_seq_len;
-            if (quality_data.size() == expected) {
-                std::vector<u8> row_major(expected);
-                for (u32 p = 0; p < fixed_seq_len; p++) {
-                    u64 col_offset = (u64)p * num_records;
-                    for (u32 r = 0; r < num_records; r++) {
-                        row_major[(u64)r * fixed_seq_len + p] = quality_data[col_offset + r];
-                    }
-                }
-                quality_data = std::move(row_major);
-            }
-        }
-    } else if (version == META_VERSION_V2 && quality_layout == QLAYOUT_COLUMNAR &&
-               fixed_seq_len > 0 && num_records > 0) {
-        // v2 layout=1: single quality.bin, column-major → untranspose
-        quality_data = read_file_bytes(dir + "/quality.bin");
-        u64 total_quals = (u64)num_records * fixed_seq_len;
-        if (quality_data.size() == total_quals) {
-            std::vector<u8> row_major(total_quals);
-            for (u32 p = 0; p < fixed_seq_len; p++) {
-                u64 col_offset = (u64)p * num_records;
-                for (u32 r = 0; r < num_records; r++) {
-                    row_major[(u64)r * fixed_seq_len + p] = quality_data[col_offset + r];
-                }
-            }
-            quality_data = std::move(row_major);
-        } else {
-            fprintf(stderr, "Warning: quality.bin size %zu != expected %llu for columnar layout\n",
-                    quality_data.size(), (unsigned long long)total_quals);
         }
     } else {
-        // v1 or v2 layout=0: single quality.bin, row-major
-        quality_data = read_file_bytes(dir + "/quality.bin");
+        if (!quality_mf.open((dir + "/quality.bin").c_str())) {
+            fclose(fm); return 1;
+        }
     }
 
+    // ---- Open output ----
     FILE* out = fopen(output_path, "wb");
-    if (!out) { fprintf(stderr, "Cannot create %s\n", output_path); return 1; }
+    if (!out) {
+        fprintf(stderr, "Cannot create %s\n", output_path);
+        for (auto fp : qual_pos_fps) if (fp) fclose(fp);
+        fclose(fm);
+        return 1;
+    }
+    // Use 4 MB output buffer for fewer syscalls
+    std::vector<char> out_buf(4 * 1024 * 1024);
+    setvbuf(out, out_buf.data(), _IOFBF, out_buf.size());
 
     const char* nl = (newline_style == NL_CRLF) ? "\r\n" : "\n";
     size_t nl_len = (newline_style == NL_CRLF) ? 2 : 1;
 
-    // Stream cursors
+    // ---- Stream cursors (into mmapped data) ----
     size_t hdr_off = 0, plus_off = 0, nm_off = 0, am_off = 0, b2_off = 0;
     size_t ex_off = 0, cs_off = 0, sw_off = 0, qw_off = 0, q_off = 0;
 
-    for (u32 r = 0; r < num_records; r++) {
-        const FastqRecordMeta& rm = metas[r];
+    // Delta state for per-position quality (persists across batches)
+    std::vector<u8> delta_prevs;
+    if (use_per_position && use_delta) {
+        delta_prevs.assign(fixed_seq_len, 0);
+    }
 
-        // Write header: prefix + suffix (v2) or full header (v1)
-        if (version == META_VERSION_V2 && !prefix.empty()) {
-            fwrite(prefix.data(), 1, prefix.size(), out);
-        }
-        fwrite(headers_data.data() + hdr_off, 1, rm.header_len, out);
-        fwrite(nl, 1, nl_len, out);
-        hdr_off += rm.header_len;
+    // ---- Batch processing loop ----
+    for (u32 batch_start = 0; batch_start < num_records; batch_start += DECODE_BATCH) {
+        u32 batch_end = std::min(batch_start + DECODE_BATCH, num_records);
+        u32 batch_count = batch_end - batch_start;
 
-        u32 L = rm.seq_len;
-
-        // Decode sequence using shared helper
-        auto raw_seq = decode_sequence(
-            L,
-            nmask_data.data() + nm_off, rm.nmask_bytes,
-            acgtmask_data.data() + am_off, rm.acgtmask_bytes,
-            bases2_data.data() + b2_off, rm.bases2_bytes,
-            exceptions_data.data() + ex_off, rm.exceptions_bytes,
-            case_data.data() + cs_off, rm.case_bytes, rm.case_mode);
-
-        nm_off += rm.nmask_bytes;
-        am_off += rm.acgtmask_bytes;
-        b2_off += rm.bases2_bytes;
-        ex_off += rm.exceptions_bytes;
-        cs_off += rm.case_bytes;
-
-        // Write sequence lines
-        auto seq_lines = decode_wrapping(
-            seq_wrap_data.data() + sw_off, rm.seq_wrap_bytes, L);
-        sw_off += rm.seq_wrap_bytes;
-
-        u32 seq_pos = 0;
-        for (size_t k = 0; k < seq_lines.size(); k++) {
-            u32 ll = seq_lines[k];
-            fwrite(raw_seq.data() + seq_pos, 1, ll, out);
-            seq_pos += ll;
-            fwrite(nl, 1, nl_len, out);
-        }
-
-        // Write plus line
-        fwrite("+", 1, 1, out);
-        if (rm.plus_len > 0) {
-            fwrite(plus_data.data() + plus_off, 1, rm.plus_len, out);
-        }
-        fwrite(nl, 1, nl_len, out);
-        plus_off += rm.plus_len;
-
-        // Decode quality
-        std::vector<u8> qual_bytes(L);
-        if (version == META_VERSION_V2) {
-            // v2: always raw (quality_data already untransposed if columnar)
-            memcpy(qual_bytes.data(), quality_data.data() + q_off, L);
+        // ---- Read batch metas from meta.bin ----
+        std::vector<FastqRecordMeta> batch_metas(batch_count);
+        if (meta_mode == META_COMPACT) {
+            std::vector<u32> hlens(batch_count);
+            read_bytes(fm, hlens.data(), batch_count * sizeof(u32));
+            for (u32 i = 0; i < batch_count; i++) {
+                batch_metas[i] = compact_template;
+                batch_metas[i].header_len = hlens[i];
+            }
         } else {
-            // v1: honor quality_mode
-            if (rm.quality_mode == QUAL_RAW) {
-                memcpy(qual_bytes.data(), quality_data.data() + q_off, L);
-            } else {
-                // QUAL_DELTA
-                if (L > 0) {
-                    qual_bytes[0] = quality_data[q_off];
-                    for (u32 i = 1; i < L; i++) {
-                        qual_bytes[i] = static_cast<u8>(
-                            (qual_bytes[i - 1] + quality_data[q_off + i]) & 0xFF);
+            read_bytes(fm, batch_metas.data(), batch_count * sizeof(FastqRecordMeta));
+        }
+
+        // ---- Read batch quality (per-position mode) ----
+        std::vector<u8> batch_quality;
+        if (use_per_position) {
+            batch_quality.resize((u64)batch_count * fixed_seq_len);
+            std::vector<u8> pos_buf(batch_count);
+            for (u32 p = 0; p < fixed_seq_len; p++) {
+                size_t nread = fread(pos_buf.data(), 1, batch_count, qual_pos_fps[p]);
+                if (nread != batch_count) {
+                    fprintf(stderr, "Warning: quality_pos_%04u.bin short read "
+                            "(%zu vs %u) at batch %u\n", p, nread, batch_count, batch_start);
+                }
+                if (use_delta) {
+                    u8 prev = delta_prevs[p];
+                    for (u32 r = 0; r < batch_count; r++) {
+                        u8 val = static_cast<u8>((prev + pos_buf[r]) & 0xFF);
+                        prev = val;
+                        batch_quality[(u64)r * fixed_seq_len + p] = val;
+                    }
+                    delta_prevs[p] = prev;
+                } else {
+                    for (u32 r = 0; r < batch_count; r++) {
+                        batch_quality[(u64)r * fixed_seq_len + p] = pos_buf[r];
                     }
                 }
             }
+        } else if (!use_per_position && quality_mf.data &&
+                   version >= META_VERSION_V2 && quality_layout == QLAYOUT_COLUMNAR &&
+                   fixed_seq_len > 0) {
+            // Columnar quality in single file: transpose batch on-the-fly
+            batch_quality.resize((u64)batch_count * fixed_seq_len);
+            for (u32 p = 0; p < fixed_seq_len; p++) {
+                u64 col_base = (u64)p * num_records + batch_start;
+                for (u32 r = 0; r < batch_count; r++) {
+                    batch_quality[(u64)r * fixed_seq_len + p] =
+                        (u8)quality_mf.data[col_base + r];
+                }
+            }
         }
-        q_off += rm.quality_bytes;
+        // For QLAYOUT_PER_RECORD or quality.bin fallback from per-position:
+        // access quality_mf directly via q_off cursor (no batch buffer needed)
 
-        // Write quality lines
-        auto qual_lines = decode_wrapping(
-            qual_wrap_data.data() + qw_off, rm.qual_wrap_bytes, L);
-        qw_off += rm.qual_wrap_bytes;
+        // ---- Decode records in this batch ----
+        for (u32 bi = 0; bi < batch_count; bi++) {
+            u32 r = batch_start + bi;
+            const FastqRecordMeta& rm = batch_metas[bi];
 
-        u32 qual_pos = 0;
-        for (size_t k = 0; k < qual_lines.size(); k++) {
-            u32 ll = qual_lines[k];
-            fwrite(qual_bytes.data() + qual_pos, 1, ll, out);
-            qual_pos += ll;
+            // Write header
+            if (version >= META_VERSION_V3) {
+                fwrite("@", 1, 1, out);
 
-            bool is_last = (r == num_records - 1) && (k == qual_lines.size() - 1);
-            if (is_last && !has_trailing_nl) {
-                // Don't write trailing newline
+                if (header_mode == HDRMODE_ILLUMINA) {
+                    const u8* hdr = (const u8*)headers_mf.data + hdr_off;
+                    size_t off = 0;
+
+                    std::string instrument_str;
+                    bool instr_const = (illumina_meta.flags & 0x04) != 0;
+                    if (instr_const) {
+                        instrument_str = illumina_meta.constant_instrument;
+                    } else {
+                        u8 instr_idx = hdr[off++];
+                        instrument_str = illumina_meta.instrument_dict[instr_idx];
+                    }
+
+                    u8 run_idx  = hdr[off++];
+                    u8 fc_idx   = hdr[off++];
+                    u8 lane_idx = hdr[off++];
+                    u8 tile_idx = hdr[off++];
+                    // X and Y as varint integers
+                    const u8* vptr = hdr + off;
+                    const u8* vend = hdr + rm.header_len;
+                    u64 x_int = decode_varint(vptr, vend);
+                    u64 y_int = decode_varint(vptr, vend);
+
+                    fwrite(illumina_meta.constant_prefix.data(),
+                           1, illumina_meta.constant_prefix.size(), out);
+                    fprintf(out, ".%u ", r + 1);
+
+                    fwrite(instrument_str.data(), 1, instrument_str.size(), out);
+                    fwrite(":", 1, 1, out);
+                    fwrite(illumina_meta.run_dict[run_idx].data(),
+                           1, illumina_meta.run_dict[run_idx].size(), out);
+                    fwrite(":", 1, 1, out);
+                    fwrite(illumina_meta.fc_dict[fc_idx].data(),
+                           1, illumina_meta.fc_dict[fc_idx].size(), out);
+                    fwrite(":", 1, 1, out);
+                    fwrite(illumina_meta.lane_dict[lane_idx].data(),
+                           1, illumina_meta.lane_dict[lane_idx].size(), out);
+                    fwrite(":", 1, 1, out);
+                    fwrite(illumina_meta.tile_dict[tile_idx].data(),
+                           1, illumina_meta.tile_dict[tile_idx].size(), out);
+                    fwrite(":", 1, 1, out);
+                    fprintf(out, "%llu", (unsigned long long)x_int);
+                    fwrite(":", 1, 1, out);
+                    fprintf(out, "%llu", (unsigned long long)y_int);
+                } else {
+                    if (!prefix.empty()) {
+                        fwrite(prefix.data(), 1, prefix.size(), out);
+                    }
+                    fwrite(headers_mf.data + hdr_off, 1, rm.header_len, out);
+                }
             } else {
+                if (version == META_VERSION_V2 && !prefix.empty()) {
+                    fwrite(prefix.data(), 1, prefix.size(), out);
+                }
+                fwrite(headers_mf.data + hdr_off, 1, rm.header_len, out);
+            }
+            fwrite(nl, 1, nl_len, out);
+            hdr_off += rm.header_len;
+
+            u32 L = rm.seq_len;
+
+            // Decode sequence
+            auto raw_seq = decode_sequence(
+                L,
+                (const u8*)nmask_mf.data + nm_off, rm.nmask_bytes,
+                (const u8*)acgtmask_mf.data + am_off, rm.acgtmask_bytes,
+                (const u8*)bases2_mf.data + b2_off, rm.bases2_bytes,
+                (const u8*)exceptions_mf.data + ex_off, rm.exceptions_bytes,
+                (const u8*)case_mf.data + cs_off, rm.case_bytes, rm.case_mode);
+
+            nm_off += rm.nmask_bytes;
+            am_off += rm.acgtmask_bytes;
+            b2_off += rm.bases2_bytes;
+            ex_off += rm.exceptions_bytes;
+            cs_off += rm.case_bytes;
+
+            // Write sequence lines
+            std::vector<u32> seq_lines;
+            if (wrap_mode == WRAPMODE_CONSTANT) {
+                seq_lines = decode_wrapping(constant_seq_wrap.data(),
+                                            static_cast<u32>(constant_seq_wrap.size()), L);
+            } else {
+                seq_lines = decode_wrapping(
+                    (const u8*)seq_wrap_mf.data + sw_off, rm.seq_wrap_bytes, L);
+                sw_off += rm.seq_wrap_bytes;
+            }
+
+            u32 seq_pos = 0;
+            for (size_t k = 0; k < seq_lines.size(); k++) {
+                u32 ll = seq_lines[k];
+                fwrite(raw_seq.data() + seq_pos, 1, ll, out);
+                seq_pos += ll;
                 fwrite(nl, 1, nl_len, out);
             }
+
+            // Write plus line
+            fwrite("+", 1, 1, out);
+            if (rm.plus_len > 0) {
+                fwrite(plus_mf.data + plus_off, 1, rm.plus_len, out);
+            }
+            fwrite(nl, 1, nl_len, out);
+            plus_off += rm.plus_len;
+
+            // Decode quality
+            std::vector<u8> qual_bytes(L);
+            if (use_per_position || (batch_quality.size() > 0)) {
+                // Per-position or columnar: use batch buffer
+                memcpy(qual_bytes.data(),
+                       batch_quality.data() + (u64)bi * fixed_seq_len, L);
+            } else if (version >= META_VERSION_V2) {
+                // Per-record quality from mmapped quality.bin
+                memcpy(qual_bytes.data(), quality_mf.data + q_off, L);
+            } else {
+                if (rm.quality_mode == QUAL_RAW) {
+                    memcpy(qual_bytes.data(), quality_mf.data + q_off, L);
+                } else {
+                    // QUAL_DELTA (v1 only)
+                    const u8* qd = (const u8*)quality_mf.data + q_off;
+                    if (L > 0) {
+                        qual_bytes[0] = qd[0];
+                        for (u32 i = 1; i < L; i++) {
+                            qual_bytes[i] = static_cast<u8>(
+                                (qual_bytes[i - 1] + qd[i]) & 0xFF);
+                        }
+                    }
+                }
+            }
+            q_off += rm.quality_bytes;
+
+            // Write quality lines
+            std::vector<u32> qual_lines;
+            if (wrap_mode == WRAPMODE_CONSTANT) {
+                qual_lines = decode_wrapping(constant_qual_wrap.data(),
+                                             static_cast<u32>(constant_qual_wrap.size()), L);
+            } else {
+                qual_lines = decode_wrapping(
+                    (const u8*)qual_wrap_mf.data + qw_off, rm.qual_wrap_bytes, L);
+                qw_off += rm.qual_wrap_bytes;
+            }
+
+            u32 qual_pos = 0;
+            for (size_t k = 0; k < qual_lines.size(); k++) {
+                u32 ll = qual_lines[k];
+                fwrite(qual_bytes.data() + qual_pos, 1, ll, out);
+                qual_pos += ll;
+
+                bool is_last = (r == num_records - 1) && (k == qual_lines.size() - 1);
+                if (is_last && !has_trailing_nl) {
+                    // Don't write trailing newline
+                } else {
+                    fwrite(nl, 1, nl_len, out);
+                }
+            }
+        }
+
+        if (batch_start == 0 || (batch_start + batch_count) == num_records ||
+            batch_start % (DECODE_BATCH * 10) == 0) {
+            fprintf(stderr, "Decoded %u / %u records...\r",
+                    batch_start + batch_count, num_records);
         }
     }
 
+    // ---- Cleanup ----
+    fclose(fm);
     fclose(out);
-    fprintf(stderr, "Decoded %u records (version=%u)\n", num_records, version);
+    for (auto fp : qual_pos_fps) if (fp) fclose(fp);
+
+    fprintf(stderr, "\nDecoded %u records (version=%u, header=%s, streaming)\n",
+            num_records, version,
+            header_mode == HDRMODE_ILLUMINA ? "illumina" : "lcp");
     return 0;
 }
 
 // ============================================================================
-// VALIDATE — check stream invariants (v1 and v2)
+// VALIDATE — check stream invariants (v1, v2, v3)
 // ============================================================================
 
 static int do_validate(const char* streams_dir) {
@@ -771,29 +1465,69 @@ static int do_validate(const char* streams_dir) {
         fprintf(stderr, "FAIL: bad magic 0x%08X (expected 0x%08X)\n", magic, META_MAGIC);
         return 1;
     }
-    if (version != META_VERSION_V1 && version != META_VERSION_V2) {
+    if (version != META_VERSION_V1 && version != META_VERSION_V2 && version != META_VERSION_V3) {
         fprintf(stderr, "FAIL: unsupported version %u\n", version);
         return 1;
     }
 
-    // Parse v2 extended header
+    // Parse v2/v3 extended header
     u8 quality_layout = QLAYOUT_PER_RECORD;
+    u8 header_mode = HDRMODE_LCP;
+    u8 meta_mode = META_FULL;
     u32 fixed_seq_len = 0;
     u32 prefix_len = 0;
     size_t global_hdr_size = 0;
 
-    if (version == META_VERSION_V2) {
+    if (version >= META_VERSION_V2) {
         if (meta.size() < 24) {
-            fprintf(stderr, "FAIL: meta.bin too small for v2 header\n");
+            fprintf(stderr, "FAIL: meta.bin too small for v2/v3 header\n");
             return 1;
         }
         quality_layout = meta[14];
-        // meta[15] = reserved
+        u8 mode_byte = meta[15];
+        header_mode = mode_byte & 0x0F;
+        meta_mode = (mode_byte >> 4) & 0x0F;
         memcpy(&fixed_seq_len, meta.data() + 16, 4);
-        memcpy(&prefix_len, meta.data() + 20, 4);
-        global_hdr_size = 24 + prefix_len;
+
+        if (version >= META_VERSION_V3 && header_mode == HDRMODE_ILLUMINA) {
+            u32 illumina_block_size;
+            memcpy(&illumina_block_size, meta.data() + 20, 4);
+            global_hdr_size = 24 + illumina_block_size;
+        } else {
+            header_mode = HDRMODE_LCP;
+            memcpy(&prefix_len, meta.data() + 20, 4);
+            global_hdr_size = 24 + prefix_len;
+        }
     } else {
         global_hdr_size = 20;
+    }
+
+    // Parse wrap_mode (v3)
+    u8 wrap_mode = WRAPMODE_PER_RECORD;
+    if (version >= META_VERSION_V3) {
+        if (meta.size() <= global_hdr_size) {
+            fprintf(stderr, "FAIL: meta.bin too small for wrap_mode\n");
+            return 1;
+        }
+        wrap_mode = meta[global_hdr_size];
+        global_hdr_size += 1;  // wrap_mode byte
+        if (wrap_mode == WRAPMODE_CONSTANT) {
+            // Skip constant wrapping data: u32 sw_len + sw_data + u32 qw_len + qw_data
+            if (global_hdr_size + 4 > meta.size()) {
+                fprintf(stderr, "FAIL: meta.bin too small for constant seq wrapping\n");
+                return 1;
+            }
+            u32 sw_len;
+            memcpy(&sw_len, meta.data() + global_hdr_size, 4);
+            global_hdr_size += 4 + sw_len;
+            if (global_hdr_size + 4 > meta.size()) {
+                fprintf(stderr, "FAIL: meta.bin too small for constant qual wrapping\n");
+                return 1;
+            }
+            u32 qw_len;
+            memcpy(&qw_len, meta.data() + global_hdr_size, 4);
+            global_hdr_size += 4 + qw_len;
+        }
     }
 
     if (meta.size() < global_hdr_size) {
@@ -801,61 +1535,108 @@ static int do_validate(const char* streams_dir) {
         return 1;
     }
 
-    size_t expected_meta = global_hdr_size + num_records * sizeof(FastqRecordMeta);
+    // Validate per-record meta size
+    size_t expected_meta;
+    if (meta_mode == META_COMPACT) {
+        expected_meta = global_hdr_size + sizeof(FastqRecordMeta) + num_records * sizeof(u32);
+    } else {
+        expected_meta = global_hdr_size + num_records * sizeof(FastqRecordMeta);
+    }
     if (meta.size() < expected_meta) {
-        fprintf(stderr, "FAIL: meta.bin too small for %u records\n", num_records);
+        fprintf(stderr, "FAIL: meta.bin too small for %u records (meta_mode=%u)\n",
+                num_records, meta_mode);
         return 1;
     }
 
     fprintf(stderr, "Validating %u records (version=%u, nl=%s, trail_nl=%d",
             num_records, version,
             nl_style == NL_CRLF ? "CRLF" : "LF", trail_nl);
-    if (version == META_VERSION_V2) {
-        fprintf(stderr, ", quality=%s, fixed_seq_len=%u, prefix_len=%u",
+    if (version >= META_VERSION_V2) {
+        fprintf(stderr, ", quality=%s, fixed_seq_len=%u, header=%s, meta=%s, wrap=%s",
                 quality_layout == QLAYOUT_PER_POS_RAW ? "per-position-raw" :
                 quality_layout == QLAYOUT_PER_POSITION ? "per-position-delta" :
                 quality_layout == QLAYOUT_COLUMNAR ? "columnar" : "per-record",
-                fixed_seq_len, prefix_len);
+                fixed_seq_len,
+                header_mode == HDRMODE_ILLUMINA ? "illumina" : "lcp",
+                meta_mode == META_COMPACT ? "compact" : "full",
+                wrap_mode == WRAPMODE_CONSTANT ? "constant" : "per-record");
     }
     fprintf(stderr, ")...\n");
 
-    auto headers_data    = read_file_bytes(dir + "/headers.bin");
-    auto plus_data       = read_file_bytes(dir + "/plus.bin");
-    auto nmask_data      = read_file_bytes(dir + "/nmask.bin");
-    auto acgtmask_data   = read_file_bytes(dir + "/acgtmask.bin");
-    auto bases2_data     = read_file_bytes(dir + "/bases2.bin");
-    auto exceptions_data = read_file_bytes(dir + "/exceptions.bin");
-    auto case_data       = read_file_bytes(dir + "/case.bin");
-    auto seq_wrap_data   = read_file_bytes(dir + "/seq_wrap.bin");
-    auto qual_wrap_data  = read_file_bytes(dir + "/qual_wrap.bin");
+    // mmap stream files for validation
+    MappedFile headers_mf, plus_mf, nmask_mf, acgtmask_mf, bases2_mf;
+    MappedFile exceptions_mf, case_mf, seq_wrap_mf, qual_wrap_mf;
+    if (!headers_mf.open((dir + "/headers.bin").c_str())) return 1;
+    if (!plus_mf.open((dir + "/plus.bin").c_str())) return 1;
+    if (!nmask_mf.open((dir + "/nmask.bin").c_str())) return 1;
+    if (!acgtmask_mf.open((dir + "/acgtmask.bin").c_str())) return 1;
+    if (!bases2_mf.open((dir + "/bases2.bin").c_str())) return 1;
+    if (!exceptions_mf.open((dir + "/exceptions.bin").c_str())) return 1;
+    if (!case_mf.open((dir + "/case.bin").c_str())) return 1;
+    if (wrap_mode != WRAPMODE_CONSTANT) {
+        if (!seq_wrap_mf.open((dir + "/seq_wrap.bin").c_str())) return 1;
+        if (!qual_wrap_mf.open((dir + "/qual_wrap.bin").c_str())) return 1;
+    }
+
+    // Wrap mmapped data for bounds-checking macros
+    const u8* headers_data = (const u8*)headers_mf.data;
+    const u8* plus_data = (const u8*)plus_mf.data;
+    const u8* nmask_data = (const u8*)nmask_mf.data;
+    const u8* acgtmask_data = (const u8*)acgtmask_mf.data;
+    const u8* bases2_data = (const u8*)bases2_mf.data;
+    const u8* exceptions_data = (const u8*)exceptions_mf.data;
+    const u8* seq_wrap_data = (const u8*)seq_wrap_mf.data;
+    const u8* qual_wrap_data = (const u8*)qual_wrap_mf.data;
 
     // Quality validation depends on layout
-    std::vector<u8> quality_data;
-    if (version == META_VERSION_V2 &&
+    MappedFile quality_mf;
+    if (version >= META_VERSION_V2 &&
         (quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW) &&
         fixed_seq_len > 0) {
-        // v3: validate per-position files
         for (u32 p = 0; p < fixed_seq_len; p++) {
             char fname[64];
             snprintf(fname, sizeof(fname), "quality_pos_%04u.bin", p);
             std::string fpath = dir + "/" + fname;
-            auto pos_data = read_file_bytes(fpath);
-            if (pos_data.size() != num_records) {
-                fprintf(stderr, "FAIL: %s size %zu != expected %u records\n",
-                        fname, pos_data.size(), num_records);
+            struct stat st;
+            if (stat(fpath.c_str(), &st) == 0) {
+                if ((size_t)st.st_size != num_records) {
+                    fprintf(stderr, "FAIL: %s size %lld != expected %u records\n",
+                            fname, (long long)st.st_size, num_records);
+                    errors++;
+                }
+            } else {
+                fprintf(stderr, "FAIL: cannot stat %s\n", fname);
                 errors++;
             }
         }
     } else {
-        quality_data = read_file_bytes(dir + "/quality.bin");
-        // For v2 columnar quality: validate total size
-        if (version == META_VERSION_V2 && quality_layout == QLAYOUT_COLUMNAR && fixed_seq_len > 0) {
+        if (!quality_mf.open((dir + "/quality.bin").c_str())) return 1;
+        if (version >= META_VERSION_V2 && quality_layout == QLAYOUT_COLUMNAR && fixed_seq_len > 0) {
             u64 expected_qual = (u64)num_records * fixed_seq_len;
-            if (quality_data.size() != expected_qual) {
+            if (quality_mf.size != expected_qual) {
                 fprintf(stderr, "FAIL: quality.bin size %zu != expected %llu for columnar layout\n",
-                        quality_data.size(), (unsigned long long)expected_qual);
+                        quality_mf.size, (unsigned long long)expected_qual);
                 errors++;
             }
+        }
+    }
+
+    // Build per-record metas (handle compact mode)
+    std::vector<FastqRecordMeta> val_metas(num_records);
+    if (meta_mode == META_COMPACT && num_records > 0) {
+        FastqRecordMeta tmpl;
+        memcpy(&tmpl, meta.data() + global_hdr_size, sizeof(FastqRecordMeta));
+        const u8* hlen_base = meta.data() + global_hdr_size + sizeof(FastqRecordMeta);
+        for (u32 i = 0; i < num_records; i++) {
+            val_metas[i] = tmpl;
+            u32 hl;
+            memcpy(&hl, hlen_base + i * sizeof(u32), sizeof(u32));
+            val_metas[i].header_len = hl;
+        }
+    } else {
+        for (u32 i = 0; i < num_records; i++) {
+            memcpy(&val_metas[i], meta.data() + global_hdr_size + i * sizeof(FastqRecordMeta),
+                   sizeof(FastqRecordMeta));
         }
     }
 
@@ -863,19 +1644,17 @@ static int do_validate(const char* streams_dir) {
     size_t ex_off = 0, cs_off = 0, sw_off = 0, qw_off = 0, q_off = 0;
 
     for (u32 r = 0; r < num_records; r++) {
-        FastqRecordMeta rm;
-        memcpy(&rm, meta.data() + global_hdr_size + r * sizeof(FastqRecordMeta),
-               sizeof(FastqRecordMeta));
+        const FastqRecordMeta& rm = val_metas[r];
         u32 L = rm.seq_len;
 
         // Header bounds
-        if (hdr_off + rm.header_len > headers_data.size()) {
+        if (hdr_off + rm.header_len > headers_mf.size) {
             fprintf(stderr, "FAIL: record[%u]: header overflows\n", r); errors++;
         }
         hdr_off += rm.header_len;
 
         // Plus bounds
-        if (plus_off + rm.plus_len > plus_data.size()) {
+        if (plus_off + rm.plus_len > plus_mf.size) {
             fprintf(stderr, "FAIL: record[%u]: plus overflows\n", r); errors++;
         }
         plus_off += rm.plus_len;
@@ -889,7 +1668,7 @@ static int do_validate(const char* streams_dir) {
 
         // Compute L'
         u32 count_n = 0;
-        if (nm_off + rm.nmask_bytes <= nmask_data.size()) {
+        if (nm_off + rm.nmask_bytes <= nmask_mf.size) {
             for (u32 i = 0; i < L; i++) {
                 if ((nmask_data[nm_off + i / 8] >> (7 - (i % 8))) & 1) count_n++;
             }
@@ -906,7 +1685,7 @@ static int do_validate(const char* streams_dir) {
 
         // Count ACGT
         u32 count_acgt = 0;
-        if (am_off + rm.acgtmask_bytes <= acgtmask_data.size()) {
+        if (am_off + rm.acgtmask_bytes <= acgtmask_mf.size) {
             for (u32 j = 0; j < Lp; j++) {
                 if ((acgtmask_data[am_off + j / 8] >> (7 - (j % 8))) & 1) count_acgt++;
             }
@@ -925,7 +1704,7 @@ static int do_validate(const char* streams_dir) {
         u32 expected_exc = Lp - count_acgt;
         u32 actual_exc = 0;
         {
-            const u8* ptr = exceptions_data.data() + ex_off;
+            const u8* ptr = exceptions_data + ex_off;
             const u8* end = ptr + rm.exceptions_bytes;
             while (ptr < end) {
                 decode_varint(ptr, end);
@@ -951,75 +1730,86 @@ static int do_validate(const char* streams_dir) {
         }
         cs_off += rm.case_bytes;
 
-        // Sequence wrapping
-        if (sw_off < seq_wrap_data.size()) {
-            u8 wm = seq_wrap_data[sw_off];
-            if (wm == WRAP_COMPACT && rm.seq_wrap_bytes >= 9) {
-                u32 width, last_len;
-                memcpy(&width, seq_wrap_data.data() + sw_off + 1, 4);
-                memcpy(&last_len, seq_wrap_data.data() + sw_off + 5, 4);
-                u32 total;
-                if (width == 0) { total = last_len; }
-                else if (last_len == width) { total = (L / width) * width; }
-                else { total = ((L > width) ? (L - last_len) / width : 0) * width + last_len; }
-                if (total != L) {
-                    fprintf(stderr, "FAIL: record[%u]: seq COMPACT total=%u != L=%u\n",
-                            r, total, L); errors++;
-                }
-            } else if (wm == WRAP_EXPLICIT && rm.seq_wrap_bytes >= 5) {
-                u32 num_lines;
-                memcpy(&num_lines, seq_wrap_data.data() + sw_off + 1, 4);
-                u32 total = 0;
-                for (u32 k = 0; k < num_lines && (sw_off + 5 + (k+1)*4) <= seq_wrap_data.size(); k++) {
-                    u32 ll;
-                    memcpy(&ll, seq_wrap_data.data() + sw_off + 5 + k * 4, 4);
-                    total += ll;
-                }
-                if (total != L) {
-                    fprintf(stderr, "FAIL: record[%u]: seq EXPLICIT sum=%u != L=%u\n",
-                            r, total, L); errors++;
+        // Sequence and quality wrapping
+        if (wrap_mode == WRAPMODE_CONSTANT) {
+            // Constant wrapping: per-record wrap bytes should be 0
+            if (rm.seq_wrap_bytes != 0) {
+                fprintf(stderr, "FAIL: record[%u]: constant wrap but seq_wrap_bytes=%u\n",
+                        r, rm.seq_wrap_bytes); errors++;
+            }
+            if (rm.qual_wrap_bytes != 0) {
+                fprintf(stderr, "FAIL: record[%u]: constant wrap but qual_wrap_bytes=%u\n",
+                        r, rm.qual_wrap_bytes); errors++;
+            }
+        } else {
+            // Sequence wrapping
+            if (sw_off < seq_wrap_mf.size) {
+                u8 wm = seq_wrap_data[sw_off];
+                if (wm == WRAP_COMPACT && rm.seq_wrap_bytes >= 9) {
+                    u32 width, last_len;
+                    memcpy(&width, seq_wrap_data + sw_off + 1, 4);
+                    memcpy(&last_len, seq_wrap_data + sw_off + 5, 4);
+                    u32 total;
+                    if (width == 0) { total = last_len; }
+                    else if (last_len == width) { total = (L / width) * width; }
+                    else { total = ((L > width) ? (L - last_len) / width : 0) * width + last_len; }
+                    if (total != L) {
+                        fprintf(stderr, "FAIL: record[%u]: seq COMPACT total=%u != L=%u\n",
+                                r, total, L); errors++;
+                    }
+                } else if (wm == WRAP_EXPLICIT && rm.seq_wrap_bytes >= 5) {
+                    u32 num_lines;
+                    memcpy(&num_lines, seq_wrap_data + sw_off + 1, 4);
+                    u32 total = 0;
+                    for (u32 k = 0; k < num_lines && (sw_off + 5 + (k+1)*4) <= seq_wrap_mf.size; k++) {
+                        u32 ll;
+                        memcpy(&ll, seq_wrap_data + sw_off + 5 + k * 4, 4);
+                        total += ll;
+                    }
+                    if (total != L) {
+                        fprintf(stderr, "FAIL: record[%u]: seq EXPLICIT sum=%u != L=%u\n",
+                                r, total, L); errors++;
+                    }
                 }
             }
-        }
-        sw_off += rm.seq_wrap_bytes;
+            sw_off += rm.seq_wrap_bytes;
 
-        // Quality wrapping
-        if (qw_off < qual_wrap_data.size()) {
-            u8 wm = qual_wrap_data[qw_off];
-            if (wm == WRAP_COMPACT && rm.qual_wrap_bytes >= 9) {
-                u32 width, last_len;
-                memcpy(&width, qual_wrap_data.data() + qw_off + 1, 4);
-                memcpy(&last_len, qual_wrap_data.data() + qw_off + 5, 4);
-                u32 total;
-                if (width == 0) { total = last_len; }
-                else if (last_len == width) { total = (L / width) * width; }
-                else { total = ((L > width) ? (L - last_len) / width : 0) * width + last_len; }
-                if (total != L) {
-                    fprintf(stderr, "FAIL: record[%u]: qual COMPACT total=%u != L=%u\n",
-                            r, total, L); errors++;
-                }
-            } else if (wm == WRAP_EXPLICIT && rm.qual_wrap_bytes >= 5) {
-                u32 num_lines;
-                memcpy(&num_lines, qual_wrap_data.data() + qw_off + 1, 4);
-                u32 total = 0;
-                for (u32 k = 0; k < num_lines && (qw_off + 5 + (k+1)*4) <= qual_wrap_data.size(); k++) {
-                    u32 ll;
-                    memcpy(&ll, qual_wrap_data.data() + qw_off + 5 + k * 4, 4);
-                    total += ll;
-                }
-                if (total != L) {
-                    fprintf(stderr, "FAIL: record[%u]: qual EXPLICIT sum=%u != L=%u\n",
-                            r, total, L); errors++;
+            // Quality wrapping
+            if (qw_off < qual_wrap_mf.size) {
+                u8 wm = qual_wrap_data[qw_off];
+                if (wm == WRAP_COMPACT && rm.qual_wrap_bytes >= 9) {
+                    u32 width, last_len;
+                    memcpy(&width, qual_wrap_data + qw_off + 1, 4);
+                    memcpy(&last_len, qual_wrap_data + qw_off + 5, 4);
+                    u32 total;
+                    if (width == 0) { total = last_len; }
+                    else if (last_len == width) { total = (L / width) * width; }
+                    else { total = ((L > width) ? (L - last_len) / width : 0) * width + last_len; }
+                    if (total != L) {
+                        fprintf(stderr, "FAIL: record[%u]: qual COMPACT total=%u != L=%u\n",
+                                r, total, L); errors++;
+                    }
+                } else if (wm == WRAP_EXPLICIT && rm.qual_wrap_bytes >= 5) {
+                    u32 num_lines;
+                    memcpy(&num_lines, qual_wrap_data + qw_off + 1, 4);
+                    u32 total = 0;
+                    for (u32 k = 0; k < num_lines && (qw_off + 5 + (k+1)*4) <= qual_wrap_mf.size; k++) {
+                        u32 ll;
+                        memcpy(&ll, qual_wrap_data + qw_off + 5 + k * 4, 4);
+                        total += ll;
+                    }
+                    if (total != L) {
+                        fprintf(stderr, "FAIL: record[%u]: qual EXPLICIT sum=%u != L=%u\n",
+                                r, total, L); errors++;
+                    }
                 }
             }
+            qw_off += rm.qual_wrap_bytes;
         }
-        qw_off += rm.qual_wrap_bytes;
 
-        // Quality bytes — for per-record quality, consume from cursor
-        // For columnar/per-position quality, quality_bytes still equals seq_len per record
-        if (version == META_VERSION_V2 &&
+        // Quality bytes
+        if (version >= META_VERSION_V2 &&
             (quality_layout == QLAYOUT_COLUMNAR || quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW)) {
-            // Don't advance q_off — quality is validated globally above
             if (rm.quality_bytes != L) {
                 fprintf(stderr, "FAIL: record[%u]: quality_bytes=%u != seq_len=%u\n",
                         r, rm.quality_bytes, L); errors++;
@@ -1033,9 +1823,9 @@ static int do_validate(const char* streams_dir) {
         }
 
         // Quality mode
-        if (version == META_VERSION_V2) {
+        if (version >= META_VERSION_V2) {
             if (rm.quality_mode != QUAL_RAW) {
-                fprintf(stderr, "FAIL: record[%u]: v2 quality_mode=%u, expected 0 (RAW)\n",
+                fprintf(stderr, "FAIL: record[%u]: v2/v3 quality_mode=%u, expected 0 (RAW)\n",
                         r, rm.quality_mode); errors++;
             }
         } else {
@@ -1053,19 +1843,20 @@ static int do_validate(const char* streams_dir) {
             errors++;
         }
     };
-    check("headers.bin",    hdr_off,  headers_data.size());
-    check("plus.bin",       plus_off, plus_data.size());
-    check("nmask.bin",      nm_off,   nmask_data.size());
-    check("acgtmask.bin",   am_off,   acgtmask_data.size());
-    check("bases2.bin",     b2_off,   bases2_data.size());
-    check("exceptions.bin", ex_off,   exceptions_data.size());
-    check("case.bin",       cs_off,   case_data.size());
-    check("seq_wrap.bin",   sw_off,   seq_wrap_data.size());
-    check("qual_wrap.bin",  qw_off,   qual_wrap_data.size());
-    // For per-record quality, check cursor; for columnar/per-position, already validated globally
-    if (!(version == META_VERSION_V2 &&
+    check("headers.bin",    hdr_off,  headers_mf.size);
+    check("plus.bin",       plus_off, plus_mf.size);
+    check("nmask.bin",      nm_off,   nmask_mf.size);
+    check("acgtmask.bin",   am_off,   acgtmask_mf.size);
+    check("bases2.bin",     b2_off,   bases2_mf.size);
+    check("exceptions.bin", ex_off,   exceptions_mf.size);
+    check("case.bin",       cs_off,   case_mf.size);
+    if (wrap_mode != WRAPMODE_CONSTANT) {
+        check("seq_wrap.bin",   sw_off,   seq_wrap_mf.size);
+        check("qual_wrap.bin",  qw_off,   qual_wrap_mf.size);
+    }
+    if (!(version >= META_VERSION_V2 &&
           (quality_layout == QLAYOUT_COLUMNAR || quality_layout == QLAYOUT_PER_POSITION || quality_layout == QLAYOUT_PER_POS_RAW))) {
-        check("quality.bin", q_off, quality_data.size());
+        check("quality.bin", q_off, quality_mf.size);
     }
 
     if (errors == 0) {
