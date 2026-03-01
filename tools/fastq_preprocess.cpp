@@ -52,6 +52,7 @@ struct ParsedHeader {
     const char* tile_start;     int tile_len;
     const char* x_start;        int x_len;
     const char* y_start;        int y_len;
+    const char* pair_start;     int pair_len;   // e.g. "/1", "/2" or empty
     bool parsed;
 };
 
@@ -98,6 +99,17 @@ static ParsedHeader parse_header_fast(const char* line, int len) {
     h.tile_start = info+colons[3]+1;h.tile_len = colons[4]-colons[3]-1;
     h.x_start = info+colons[4]+1;   h.x_len = colons[5]-colons[4]-1;
     h.y_start = info+colons[5]+1;   h.y_len = info_len-colons[5]-1;
+
+    // Strip paired-end suffix (/1, /2) from Y if present
+    h.pair_start = nullptr; h.pair_len = 0;
+    for (int i = 0; i < h.y_len; i++) {
+        if (h.y_start[i] == '/') {
+            h.pair_start = h.y_start + i;
+            h.pair_len = h.y_len - i;
+            h.y_len = i;
+            break;
+        }
+    }
 
     h.parsed = true;
     return h;
@@ -210,14 +222,19 @@ int main(int argc, char** argv) {
         std::cerr << "Parsed headers: " << parsed_count << "/" << nrecs
                   << (all_parsed ? " (all)" : " (SOME UNPARSED)") << "\n";
 
-        std::string constant_prefix, constant_instrument;
+        std::string constant_prefix, constant_instrument, constant_pair_suffix;
         bool prefix_constant = true, instrument_constant = true, read_num_sequential = true;
+        bool pair_suffix_constant = true, has_pair_suffix = false;
         std::unordered_set<std::string> run_vals, fc_vals, lane_vals, tile_vals;
 
         if (all_parsed) {
             auto& h0 = headers[0];
             constant_prefix = sv(h0.prefix_start, h0.prefix_len);
             constant_instrument = sv(h0.instr_start, h0.instr_len);
+            if (h0.pair_len > 0) {
+                has_pair_suffix = true;
+                constant_pair_suffix = sv(h0.pair_start, h0.pair_len);
+            }
 
             for (size_t i = 0; i < nrecs; i++) {
                 auto& h = headers[i];
@@ -228,6 +245,13 @@ int main(int argc, char** argv) {
                 fc_vals.insert(sv(h.fc_start, h.fc_len));
                 lane_vals.insert(sv(h.lane_start, h.lane_len));
                 tile_vals.insert(sv(h.tile_start, h.tile_len));
+                if (has_pair_suffix) {
+                    if (h.pair_len == 0 || sv(h.pair_start, h.pair_len) != constant_pair_suffix)
+                        pair_suffix_constant = false;
+                } else if (h.pair_len > 0) {
+                    has_pair_suffix = true;
+                    pair_suffix_constant = false;
+                }
             }
 
             std::cerr << "  Prefix: " << (prefix_constant ? "constant (" + constant_prefix + ")" : "varies") << "\n"
@@ -235,6 +259,8 @@ int main(int argc, char** argv) {
                       << "  Read numbers: " << (read_num_sequential ? "sequential (1..N)" : "non-sequential") << "\n"
                       << "  Runs: " << run_vals.size() << ", Flowcells: " << fc_vals.size()
                       << ", Lanes: " << lane_vals.size() << ", Tiles: " << tile_vals.size() << "\n";
+            if (has_pair_suffix)
+                std::cerr << "  Pair suffix: " << (pair_suffix_constant ? "constant (" + constant_pair_suffix + ")" : "varies") << "\n";
         }
 
         // Build dictionaries
@@ -267,6 +293,7 @@ int main(int argc, char** argv) {
             if (prefix_constant) flags |= 2;
             if (instrument_constant) flags |= 4;
             if (read_num_sequential) flags |= 8;
+            if (has_pair_suffix && pair_suffix_constant) flags |= 16;
             fmeta.write((char*)&flags, 1);
 
             auto write_str = [&](const std::string& s) {
@@ -276,6 +303,7 @@ int main(int argc, char** argv) {
             };
             if (prefix_constant) write_str(constant_prefix);
             if (instrument_constant) write_str(constant_instrument);
+            if (has_pair_suffix && pair_suffix_constant) write_str(constant_pair_suffix);
 
             auto write_dict_fn = [&](const std::vector<std::string>& dict) {
                 int32_t dsize = (int32_t)dict.size();
@@ -397,6 +425,7 @@ int main(int argc, char** argv) {
         bool prefix_constant = flags & 2;
         bool instrument_constant = flags & 4;
         bool read_num_sequential = flags & 8;
+        bool has_pair_suffix = flags & 16;
 
         auto read_str = [&]() -> std::string {
             int16_t len; fmeta.read((char*)&len, 2);
@@ -404,9 +433,10 @@ int main(int argc, char** argv) {
             return s;
         };
 
-        std::string constant_prefix, constant_instrument;
+        std::string constant_prefix, constant_instrument, constant_pair_suffix;
         if (prefix_constant) constant_prefix = read_str();
         if (instrument_constant) constant_instrument = read_str();
+        if (has_pair_suffix) constant_pair_suffix = read_str();
 
         auto read_dict = [&]() -> std::vector<std::string> {
             int32_t dsize; fmeta.read((char*)&dsize, 4);
@@ -513,6 +543,7 @@ int main(int argc, char** argv) {
                             buf += ':'; buf += tile_dict[tid];
                             buf += ':'; buf.append(fields[4].s, fields[4].len);
                             buf += ':'; buf.append(fields[5].s, fields[5].len);
+                            if (has_pair_suffix) buf += constant_pair_suffix;
                             buf += '\n';
                             buf.append(fields[6].s, fields[6].len); buf += '\n';
                             buf += "+\n";
