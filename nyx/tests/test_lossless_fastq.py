@@ -757,3 +757,401 @@ class TestFullPipeline:
             catch_exceptions=False,
         )
         assert result.exit_code == 0
+
+
+# =============================================================================
+# Tier 5: Packed NQF codec roundtrip
+# =============================================================================
+
+
+@requires_fastq_codec
+class TestPackedCodecRoundTrip:
+    """Test that fastq_codec encode-packed -> decode-packed produces byte-identical output."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fastq_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip(self, fastq_fixture, tmp_path):
+        from nyx.core.fastq_codec import encode_packed, decode_packed
+
+        packed_dir = tmp_path / "packed"
+        output = tmp_path / "reconstructed.fastq"
+
+        encode_packed(fastq_fixture, packed_dir)
+        decode_packed(packed_dir, output)
+
+        assert _sha256(fastq_fixture) == _sha256(output), (
+            f"Packed roundtrip failed for {fastq_fixture.name}: files differ"
+        )
+
+    def test_chunk_files_created(self, fastq_fixture, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunk_files = encode_packed(fastq_fixture, packed_dir)
+
+        assert len(chunk_files) >= 1
+        for cf in chunk_files:
+            assert cf.name.startswith("chunk_")
+            assert cf.name.endswith(".bin")
+            assert cf.stat().st_size > 0
+
+
+@requires_fastq_codec
+class TestNQFVariantSelection:
+    """Test that NQF variant auto-detection selects the right format."""
+
+    def _get_magic(self, chunk_path):
+        with open(chunk_path, "rb") as f:
+            return f.read(4)
+
+    def test_illumina_fixed_is_nqf1(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunks = encode_packed(FIXTURES_DIR / "illumina_reads.fastq", packed_dir)
+        assert self._get_magic(chunks[0]) == b"NQF1"
+
+    def test_illumina_multi_instrument_is_nqf1(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunks = encode_packed(
+            FIXTURES_DIR / "illumina_multi_instrument.fastq", packed_dir)
+        assert self._get_magic(chunks[0]) == b"NQF1"
+
+    def test_generic_is_nqf3(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunks = encode_packed(FIXTURES_DIR / "multi_record.fastq", packed_dir)
+        assert self._get_magic(chunks[0]) == b"NQF3"
+
+    def test_minimal_is_nqf3(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunks = encode_packed(FIXTURES_DIR / "minimal.fastq", packed_dir)
+        assert self._get_magic(chunks[0]) == b"NQF3"
+
+
+@requires_fastq_codec
+class TestPackedInvariants:
+    """Validate internal consistency of packed NQF binary files."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fastq_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_header_invariants(self, fastq_fixture, tmp_path):
+        from nyx.core.fastq_codec import encode_packed
+
+        packed_dir = tmp_path / "packed"
+        chunks = encode_packed(fastq_fixture, packed_dir)
+
+        for chunk_path in chunks:
+            data = chunk_path.read_bytes()
+            assert len(data) >= 80, "Chunk too small for header"
+
+            magic = data[0:4]
+            assert magic in (b"NQF1", b"NQF2", b"NQF3"), f"Bad magic: {magic!r}"
+
+            version = struct.unpack_from("<I", data, 4)[0]
+            assert version in (1, 2), f"Bad version: {version}"
+
+            num_records = struct.unpack_from("<I", data, 8)[0]
+            assert num_records > 0, "Zero records"
+
+            newline_style = data[12]
+            assert newline_style in (0, 1), f"Bad newline_style: {newline_style}"
+
+            has_trailing = data[13]
+            assert has_trailing in (0, 1), f"Bad has_trailing: {has_trailing}"
+
+            stream_flags = data[14]
+            assert stream_flags < 8, f"Bad stream_flags: {stream_flags}"
+
+            # Verify totals add up
+            info_block_size = struct.unpack_from("<I", data, 20)[0]
+            total_hdr = struct.unpack_from("<I", data, 24)[0]
+            total_plus = struct.unpack_from("<I", data, 28)[0]
+            total_nmask = struct.unpack_from("<I", data, 32)[0]
+            total_acgt = struct.unpack_from("<I", data, 36)[0]
+            total_bases = struct.unpack_from("<I", data, 40)[0]
+            total_exc = struct.unpack_from("<I", data, 44)[0]
+            total_case = struct.unpack_from("<I", data, 48)[0]
+            total_seq_wr = struct.unpack_from("<I", data, 52)[0]
+            total_qual_wr = struct.unpack_from("<I", data, 56)[0]
+            total_quality = struct.unpack_from("<I", data, 60)[0]
+
+            # Expected size: header + info + metadata + all payloads
+            # v2 uses compact 8-byte metadata for NQF1, v1 uses 44-byte
+            meta_per_record = 8 if (version == 2 and magic == b"NQF1") else 44
+            expected_size = (80 + info_block_size + num_records * meta_per_record
+                            + total_hdr + total_plus + total_nmask + total_acgt
+                            + total_bases + total_exc + total_case
+                            + total_seq_wr + total_qual_wr + total_quality)
+            assert len(data) == expected_size, (
+                f"Size mismatch: actual={len(data)}, expected={expected_size}"
+            )
+
+
+@requires_fastq_codec
+class TestPackedMultiChunk:
+    """Test packed codec with multiple chunks."""
+
+    def test_multi_chunk_roundtrip(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed, decode_packed
+
+        fixture = FIXTURES_DIR / "illumina_reads.fastq"
+        packed_dir = tmp_path / "packed"
+        output = tmp_path / "reconstructed.fastq"
+
+        chunks = encode_packed(fixture, packed_dir, num_chunks=3)
+        assert len(chunks) == 3
+
+        decode_packed(packed_dir, output)
+        assert _sha256(fixture) == _sha256(output)
+
+    def test_multi_chunk_generic(self, tmp_path):
+        from nyx.core.fastq_codec import encode_packed, decode_packed
+
+        fixture = FIXTURES_DIR / "varying_quality.fastq"
+        packed_dir = tmp_path / "packed"
+        output = tmp_path / "reconstructed.fastq"
+
+        chunks = encode_packed(fixture, packed_dir, num_chunks=2)
+        assert len(chunks) == 2
+
+        decode_packed(packed_dir, output)
+        assert _sha256(fixture) == _sha256(output)
+
+
+# =============================================================================
+# Tier 6: Full pipeline with packed format (requires zli)
+# =============================================================================
+
+
+@requires_fastq_codec
+@requires_zli
+class TestFullPipelinePacked:
+    """Test full compress -> decompress pipeline with packed NQF format (--packed flag)."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fastq_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip(self, fastq_fixture, tmp_path):
+        from click.testing import CliRunner
+        from nyx.cli import main
+
+        runner = CliRunner()
+        compressed = tmp_path / "compressed.zlfastq"
+        decompressed = tmp_path / "decompressed.fastq"
+
+        result = runner.invoke(
+            main,
+            ["compress-lossless-fastq", str(fastq_fixture),
+             "-o", str(compressed), "--packed"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Compress failed:\n{result.output}"
+        assert compressed.exists()
+
+        result = runner.invoke(
+            main,
+            ["decompress-lossless-fastq", str(compressed),
+             "-o", str(decompressed), "-f"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
+        assert decompressed.exists()
+
+        assert _sha256(fastq_fixture) == _sha256(decompressed), (
+            f"Full pipeline packed roundtrip failed for {fastq_fixture.name}"
+        )
+
+
+# =============================================================================
+# Tier 7: CSV codec roundtrip
+# =============================================================================
+
+
+@requires_fastq_codec
+class TestCSVCodecRoundTrip:
+    """Test that fastq_codec encode-csv -> decode-csv produces byte-identical output."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fastq_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip(self, fastq_fixture, tmp_path):
+        from nyx.core.fastq_codec import encode_csv, decode_csv
+
+        csv_dir = tmp_path / "csv"
+        output = tmp_path / "reconstructed.fastq"
+
+        encode_csv(fastq_fixture, csv_dir)
+        decode_csv(csv_dir, output)
+
+        assert _sha256(fastq_fixture) == _sha256(output), (
+            f"CSV roundtrip failed for {fastq_fixture.name}: files differ"
+        )
+
+    def test_output_files_created(self, fastq_fixture, tmp_path):
+        from nyx.core.fastq_codec import encode_csv
+
+        csv_dir = tmp_path / "csv"
+        files = encode_csv(fastq_fixture, csv_dir)
+
+        names = {f.name for f in files}
+        assert "meta.bin" in names, "meta.bin not produced"
+        assert any(n.startswith("part_") and n.endswith(".tsv") for n in names), (
+            "No part_*.tsv files produced"
+        )
+
+
+@requires_fastq_codec
+class TestCSVMultiPart:
+    """Test CSV codec with multiple TSV parts."""
+
+    def test_multi_part_illumina(self, tmp_path):
+        from nyx.core.fastq_codec import encode_csv, decode_csv
+
+        fixture = FIXTURES_DIR / "illumina_reads.fastq"
+        csv_dir = tmp_path / "csv"
+        output = tmp_path / "reconstructed.fastq"
+
+        files = encode_csv(fixture, csv_dir, num_parts=3)
+        tsv_parts = [f for f in files if f.name.startswith("part_")]
+        assert len(tsv_parts) == 3
+
+        decode_csv(csv_dir, output)
+        assert _sha256(fixture) == _sha256(output)
+
+    def test_multi_part_generic(self, tmp_path):
+        from nyx.core.fastq_codec import encode_csv, decode_csv
+
+        fixture = FIXTURES_DIR / "varying_quality.fastq"
+        csv_dir = tmp_path / "csv"
+        output = tmp_path / "reconstructed.fastq"
+
+        files = encode_csv(fixture, csv_dir, num_parts=2)
+        tsv_parts = [f for f in files if f.name.startswith("part_")]
+        assert len(tsv_parts) == 2
+
+        decode_csv(csv_dir, output)
+        assert _sha256(fixture) == _sha256(output)
+
+
+@requires_fastq_codec
+class TestCSVIlluminaDetection:
+    """Test that Illumina fixtures produce 8-column TSV and generic produce 3-column."""
+
+    def test_illumina_8_columns(self, tmp_path):
+        from nyx.core.fastq_codec import encode_csv
+
+        csv_dir = tmp_path / "csv"
+        encode_csv(FIXTURES_DIR / "illumina_reads.fastq", csv_dir)
+
+        tsv = next(csv_dir.glob("part_*.tsv"))
+        first_line = tsv.read_text().split("\n")[0]
+        cols = first_line.split("\t")
+        assert len(cols) >= 8, f"Expected >= 8 columns for Illumina, got {len(cols)}"
+
+    def test_generic_3_columns(self, tmp_path):
+        from nyx.core.fastq_codec import encode_csv
+
+        csv_dir = tmp_path / "csv"
+        encode_csv(FIXTURES_DIR / "multi_record.fastq", csv_dir)
+
+        tsv = next(csv_dir.glob("part_*.tsv"))
+        first_line = tsv.read_text().split("\n")[0]
+        cols = first_line.split("\t")
+        assert len(cols) == 3, f"Expected 3 columns for generic, got {len(cols)}"
+
+
+# =============================================================================
+# Tier 8: Full pipeline with CSV format (default, requires zli)
+# =============================================================================
+
+
+@requires_fastq_codec
+@requires_zli
+class TestFullPipelineCSV:
+    """Test full compress -> decompress pipeline with CSV format (default)."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fastq_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip(self, fastq_fixture, tmp_path):
+        from click.testing import CliRunner
+        from nyx.cli import main
+
+        runner = CliRunner()
+        compressed = tmp_path / "compressed.zlfastq"
+        decompressed = tmp_path / "decompressed.fastq"
+
+        result = runner.invoke(
+            main,
+            ["compress-lossless-fastq", str(fastq_fixture),
+             "-o", str(compressed)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Compress failed:\n{result.output}"
+        assert compressed.exists()
+
+        result = runner.invoke(
+            main,
+            ["decompress-lossless-fastq", str(compressed),
+             "-o", str(decompressed), "-f"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
+        assert decompressed.exists()
+
+        assert _sha256(fastq_fixture) == _sha256(decompressed), (
+            f"Full pipeline CSV roundtrip failed for {fastq_fixture.name}"
+        )
+
+
+# =============================================================================
+# Tier 9: Legacy and packed modes still work
+# =============================================================================
+
+
+@requires_fastq_codec
+@requires_zli
+class TestLegacyModeStillWorks:
+    """Test that --legacy flag still produces valid output."""
+
+    def test_legacy_roundtrip(self, tmp_path):
+        from click.testing import CliRunner
+        from nyx.cli import main
+
+        fixture = FIXTURES_DIR / "minimal.fastq"
+        runner = CliRunner()
+        compressed = tmp_path / "compressed.zlfastq"
+        decompressed = tmp_path / "decompressed.fastq"
+
+        result = runner.invoke(
+            main,
+            ["compress-lossless-fastq", str(fixture),
+             "-o", str(compressed), "--legacy"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Legacy compress failed:\n{result.output}"
+
+        result = runner.invoke(
+            main,
+            ["decompress-lossless-fastq", str(compressed),
+             "-o", str(decompressed), "-f"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Legacy decompress failed:\n{result.output}"
+
+        assert _sha256(fixture) == _sha256(decompressed), (
+            "Legacy mode roundtrip failed"
+        )

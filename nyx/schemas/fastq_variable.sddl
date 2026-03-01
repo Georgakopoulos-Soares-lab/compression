@@ -1,0 +1,64 @@
+U32 = UInt32LE
+
+# NQF2/NQF3: Variable-Length FASTQ Packed Binary
+# Row-major quality layout: quality scores concatenated per-record.
+# Used for Illumina variable-length reads (NQF2) and generic FASTQ (NQF3).
+
+magic           : Byte[4]
+version         : U32
+num_records     : U32
+newline_style   : UInt8
+has_trailing_nl : UInt8
+stream_flags    : UInt8
+wrap_mode       : UInt8
+fixed_seq_len   : U32
+info_block_size : U32
+total_hdr       : U32
+total_plus      : U32
+total_nmask     : U32
+total_acgt      : U32
+total_bases     : U32
+total_exc       : U32
+total_case      : U32
+total_seq_wr    : U32
+total_qual_wr   : U32
+total_quality   : U32
+_reserved       : Byte[16]
+
+# Info block: Illumina dictionary (NQF2) or LCP prefix (NQF3)
+#             + optional constant wrapping
+info_block      : Byte[info_block_size]
+
+# Per-record metadata (44 bytes each)
+FastqRecordMeta = {
+  seq_len       : U32
+  hdr_len       : U32
+  plus_len      : U32
+  nmask_bytes   : U32
+  acgt_bytes    : U32
+  bases_bytes   : U32
+  exc_bytes     : U32
+  case_bytes    : U32
+  seq_wr_bytes  : U32
+  qual_wr_bytes : U32
+  case_mode     : UInt8
+  _pad          : Byte[3]
+}
+
+metadata        : FastqRecordMeta[num_records]
+
+# Payload buffers
+hdr_data        : Byte[total_hdr]
+plus_data       : Byte[total_plus]
+nmask_data      : Byte[total_nmask]
+acgt_data       : Byte[total_acgt]
+bases_data      : Byte[total_bases]
+exc_data        : Byte[total_exc]
+case_data       : Byte[total_case]
+seq_wr_data     : Byte[total_seq_wr]
+qual_wr_data    : Byte[total_qual_wr]
+
+# Row-major quality: concatenated per-record quality scores
+quality_data    : Byte[total_quality]
+
+: Byte[_rem]

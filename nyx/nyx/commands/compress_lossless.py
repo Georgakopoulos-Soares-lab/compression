@@ -504,13 +504,25 @@ def _compress_fasta_packed(
                 click.echo(f"    {num_samples} samples, "
                            f"total {total_train_size:,} bytes")
             else:
-                # --- Single-file training: use first chunk ---
+                # --- Single-file training: representative sample ---
                 click.echo("  [2/4] Training SDDL compressor for nucleotide FASTA...")
-                sample_chunk = chunk_files[0]
-                shutil.copy2(sample_chunk, training_dir / sample_chunk.name)
+                n = len(chunk_files)
+                if n <= 3:
+                    sample_indices = list(range(n))
+                else:
+                    sample_indices = [0, n // 2, n - 1]
+                total_sample_size = 0
+                for si in sample_indices:
+                    src = chunk_files[si]
+                    shutil.copy2(src, training_dir / src.name)
+                    total_sample_size += src.stat().st_size
+                click.echo(f"    Training on {len(sample_indices)} sample chunk(s) "
+                           f"from positions {sample_indices}: "
+                           f"{total_sample_size:,} bytes")
                 if verbose:
-                    click.echo(f"    Training sample: "
-                               f"{sample_chunk.stat().st_size:,} bytes")
+                    for si in sample_indices:
+                        click.echo(f"      {chunk_files[si].name}: "
+                                   f"{chunk_files[si].stat().st_size:,} bytes")
 
             sddl_path = find_schema("nucleotide_fasta.sddl")
             openzl.train(
@@ -720,13 +732,25 @@ def _compress_protein_packed(
                 click.echo(f"    {num_samples} samples, "
                            f"total {total_train_size:,} bytes")
             else:
-                # Single-file training: use first chunk
+                # Single-file training: representative sample
                 click.echo("  [2/4] Training SDDL compressor for protein FASTA...")
-                sample_chunk = chunk_files[0]
-                shutil.copy2(sample_chunk, training_dir / sample_chunk.name)
+                n = len(chunk_files)
+                if n <= 3:
+                    sample_indices = list(range(n))
+                else:
+                    sample_indices = [0, n // 2, n - 1]
+                total_sample_size = 0
+                for si in sample_indices:
+                    src = chunk_files[si]
+                    shutil.copy2(src, training_dir / src.name)
+                    total_sample_size += src.stat().st_size
+                click.echo(f"    Training on {len(sample_indices)} sample chunk(s) "
+                           f"from positions {sample_indices}: "
+                           f"{total_sample_size:,} bytes")
                 if verbose:
-                    click.echo(f"    Training sample: "
-                               f"{sample_chunk.stat().st_size:,} bytes")
+                    for si in sample_indices:
+                        click.echo(f"      {chunk_files[si].name}: "
+                                   f"{chunk_files[si].stat().st_size:,} bytes")
 
             sddl_path = find_schema("protein_fasta.sddl")
             openzl.train(
