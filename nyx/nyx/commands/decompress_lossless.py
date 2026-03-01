@@ -50,6 +50,27 @@ _CHUNK_PATTERN = re.compile(r"^(.+\.bin)\.(\d{3})$")
 # Pattern for per-position quality files (v3 layout=2)
 _QUALITY_POS_PATTERN = re.compile(r"^quality_pos_\d{4}\.bin$")
 
+# Pattern for packed NXF2 chunk files
+_PACKED_CHUNK_PATTERN = re.compile(r"^chunk_\d{6}\.bin$")
+
+
+def _is_packed_format(entry_names):
+    """Detect if container uses the new packed format (chunk_*.bin entries)."""
+    return any(_PACKED_CHUNK_PATTERN.match(n) for n in entry_names)
+
+
+def _detect_packed_subtype(chunk_path: Path) -> str:
+    """Detect whether a decompressed chunk is nucleotide (NXF2) or protein (NXFP).
+
+    Reads the first 4 bytes (magic) of the chunk file.
+    Returns 'nucleotide' or 'protein'.
+    """
+    with open(chunk_path, "rb") as f:
+        magic = f.read(4)
+    if magic == b"NXFP":
+        return "protein"
+    return "nucleotide"
+
 
 def _detect_container(filepath: Path) -> str:
     """Detect container type from magic bytes. Returns 'fasta' or 'fastq'."""
@@ -167,73 +188,114 @@ def decompress_lossless_cmd(input_file, output, verbose, force):
             for name, path in sorted(entries.items()):
                 click.echo(f"    {name}: {path.stat().st_size:,} bytes")
 
-        # Step 2: Decompress streams (parallel)
-        click.echo("  [2/3] Decompressing streams with OpenZL...")
+        # Detect packed NXF2 format (new FASTA path) vs old multi-stream format
+        use_packed = (not is_fastq) and _is_packed_format(entries.keys())
 
-        decompress_tasks = []
-        copy_tasks = []
-        for name, extracted_path in sorted(entries.items()):
-            if _is_compressible(name, compressible, is_fastq=is_fastq) and extracted_path.stat().st_size > 0:
-                decompress_tasks.append((name, extracted_path, decomp_dir / name))
+        if use_packed:
+            # --- New packed FASTA decompression path ---
+            # Step 2: Decompress all chunk entries (parallel)
+            click.echo("  [2/3] Decompressing NXF2 chunks with OpenZL...")
+            decompress_tasks = []
+            for name, extracted_path in sorted(entries.items()):
+                if extracted_path.stat().st_size > 0:
+                    decompress_tasks.append((name, extracted_path, streams_dir / name))
+
+            if decompress_tasks:
+                num_workers = min(os.cpu_count() or 4, len(decompress_tasks))
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=num_workers
+                ) as executor:
+                    futures = {}
+                    for name, extracted_path, decompressed_path in decompress_tasks:
+                        fut = executor.submit(
+                            _decompress_one,
+                            name, extracted_path, decompressed_path, verbose,
+                        )
+                        futures[fut] = name
+
+                    for fut in concurrent.futures.as_completed(futures):
+                        fut.result()
+
+            # Step 3: Decode packed chunks back to FASTA
+            # Detect nucleotide vs protein by reading magic from first chunk
+            first_chunk = sorted(streams_dir.glob("chunk_*.bin"))[0]
+            packed_subtype = _detect_packed_subtype(first_chunk)
+
+            if packed_subtype == "protein":
+                click.echo(f"  [3/3] Reconstructing protein FASTA from packed chunks...")
+                codec.decode_protein_packed(streams_dir, output_path, verbose=verbose)
             else:
-                copy_tasks.append((extracted_path, decomp_dir / name))
-
-        # Copy non-compressed entries directly
-        for src, dst in copy_tasks:
-            shutil.copy2(src, dst)
-
-        # Decompress in parallel
-        if decompress_tasks:
-            num_workers = min(os.cpu_count() or 4, len(decompress_tasks))
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=num_workers
-            ) as executor:
-                futures = {}
-                for name, extracted_path, decompressed_path in decompress_tasks:
-                    fut = executor.submit(
-                        _decompress_one,
-                        name, extracted_path, decompressed_path, verbose,
-                    )
-                    futures[fut] = name
-
-                for fut in concurrent.futures.as_completed(futures):
-                    fut.result()  # raises on error
-
-        # Step 2b: Reassemble chunked streams
-        chunk_groups = {}
-        non_chunked = []
-        for name in sorted(entries.keys()):
-            m = _CHUNK_PATTERN.match(name)
-            if m:
-                base = m.group(1)
-                chunk_groups.setdefault(base, []).append(decomp_dir / name)
-            else:
-                non_chunked.append(name)
-
-        for name in non_chunked:
-            src = decomp_dir / name
-            if src.exists():
-                shutil.copy2(src, streams_dir / name)
-
-        for base_name, chunk_paths in sorted(chunk_groups.items()):
-            out_path = streams_dir / base_name
-            with open(out_path, "wb") as out_f:
-                for cp in sorted(chunk_paths):
-                    with open(cp, "rb") as in_f:
-                        shutil.copyfileobj(in_f, out_f)
-            if verbose:
-                click.echo(
-                    f"    Reassembled {base_name} from "
-                    f"{len(chunk_paths)} chunks "
-                    f"({out_path.stat().st_size:,} bytes)"
-                )
-
-        # Step 3: Decode streams back to original format
-        click.echo(f"  [3/3] Reconstructing {format_label}...")
-        if is_fastq:
-            fastq_codec.decode(streams_dir, output_path, verbose=verbose)
+                click.echo(f"  [3/3] Reconstructing FASTA from packed chunks...")
+                codec.decode_packed(streams_dir, output_path, verbose=verbose)
         else:
-            codec.decode(streams_dir, output_path, verbose=verbose)
+            # --- Old multi-stream decompression path (FASTA legacy + FASTQ) ---
+            # Step 2: Decompress streams (parallel)
+            click.echo("  [2/3] Decompressing streams with OpenZL...")
+
+            decompress_tasks = []
+            copy_tasks = []
+            for name, extracted_path in sorted(entries.items()):
+                if _is_compressible(name, compressible, is_fastq=is_fastq) and extracted_path.stat().st_size > 0:
+                    decompress_tasks.append((name, extracted_path, decomp_dir / name))
+                else:
+                    copy_tasks.append((extracted_path, decomp_dir / name))
+
+            # Copy non-compressed entries directly
+            for src, dst in copy_tasks:
+                shutil.copy2(src, dst)
+
+            # Decompress in parallel
+            if decompress_tasks:
+                num_workers = min(os.cpu_count() or 4, len(decompress_tasks))
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=num_workers
+                ) as executor:
+                    futures = {}
+                    for name, extracted_path, decompressed_path in decompress_tasks:
+                        fut = executor.submit(
+                            _decompress_one,
+                            name, extracted_path, decompressed_path, verbose,
+                        )
+                        futures[fut] = name
+
+                    for fut in concurrent.futures.as_completed(futures):
+                        fut.result()  # raises on error
+
+            # Step 2b: Reassemble chunked streams
+            chunk_groups = {}
+            non_chunked = []
+            for name in sorted(entries.keys()):
+                m = _CHUNK_PATTERN.match(name)
+                if m:
+                    base = m.group(1)
+                    chunk_groups.setdefault(base, []).append(decomp_dir / name)
+                else:
+                    non_chunked.append(name)
+
+            for name in non_chunked:
+                src = decomp_dir / name
+                if src.exists():
+                    shutil.copy2(src, streams_dir / name)
+
+            for base_name, chunk_paths in sorted(chunk_groups.items()):
+                out_path = streams_dir / base_name
+                with open(out_path, "wb") as out_f:
+                    for cp in sorted(chunk_paths):
+                        with open(cp, "rb") as in_f:
+                            shutil.copyfileobj(in_f, out_f)
+                if verbose:
+                    click.echo(
+                        f"    Reassembled {base_name} from "
+                        f"{len(chunk_paths)} chunks "
+                        f"({out_path.stat().st_size:,} bytes)"
+                    )
+
+            # Step 3: Decode streams back to original format
+            click.echo(f"  [3/3] Reconstructing {format_label}...")
+            if is_fastq:
+                fastq_codec.decode(streams_dir, output_path, verbose=verbose)
+            else:
+                codec.decode(streams_dir, output_path, verbose=verbose)
 
         elapsed = time.time() - t0
         output_size = output_path.stat().st_size

@@ -1,6 +1,6 @@
 # Project Context: Nyx — OpenZL Genomic Compression CLI
 
-> **Auto-generated reference.** Status: Python CLI Architecture (post-migration). Last scanned: 2026-02-19
+> **Auto-generated reference.** Status: Python CLI Architecture (post-migration). Last scanned: 2026-02-28
 
 ## 1. Executive Summary
 
@@ -9,7 +9,7 @@
 Nyx supports two compression pipelines:
 
 1. **Schema-aware compression** (`nyx compress`): Preprocesses genomic data into SDDL-described binary formats, trains domain-specific compressors, compresses in parallel, and bundles results into `.nyx` archives.
-2. **Lossless stream compression** (`nyx compress-lossless`): Decomposes FASTA/FASTQ files into typed binary streams (N-mask, 2-bit bases, ACGT-mask, exceptions, case, wrapping, quality), compresses each stream independently with OpenZL, and bundles into `.zlfasta`/`.zlfastq` containers with byte-exact reconstruction.
+2. **Lossless stream compression** (`nyx compress-lossless`): For FASTA, encodes into packed binary chunks (NXF2 for nucleotide, NXFP for protein) described by SDDL schemas, trains a single domain-specific compressor, and compresses all chunks. For FASTQ, decomposes into typed binary streams and compresses each independently. Both bundle into `.zlfasta`/`.zlfastq` containers with byte-exact reconstruction. Auto-detects nucleotide vs protein FASTA.
 
 Nyx replaces an earlier bash-script-driven pipeline with a proper Python package that can be `pip install`-ed and invoked as a single `nyx compress genome.fasta` command.
 
@@ -36,7 +36,7 @@ Nyx follows a **CLI orchestrator + native binary** pattern. The Python layer han
 |------|-------|---------------|
 | `nyx/nyx/core/openzl.py` | `zli` binary | `compress()`, `decompress()`, `train()`, `train_async()`, `benchmark()`, `inspect()`, `list_profiles()`, `passthrough()` |
 | `nyx/nyx/core/preprocessor.py` | `genomic_preprocessor` binary | `preprocess()` |
-| `nyx/nyx/core/codec.py` | `fasta_codec` binary | `encode()`, `decode()`, `validate()` |
+| `nyx/nyx/core/codec.py` | `fasta_codec` binary | `encode()`, `decode()`, `encode_packed()`, `decode_packed()`, `encode_protein_packed()`, `decode_protein_packed()` |
 | `nyx/nyx/core/fastq_codec.py` | `fastq_codec` binary | `encode()`, `decode()`, `validate()` |
 | `nyx/nyx/core/sample.py` | `scripts/make_train_sample.py` | `create_training_sample()` |
 
@@ -90,29 +90,58 @@ nyx compress genome.fasta
 genome.fasta.nyx
 ```
 
-### 2.4 Lossless Pipeline
+### 2.4 Lossless Pipeline — FASTA (Packed NXF2/NXFP)
 
 ```
 nyx compress-lossless genome.fasta
     │
     ▼
-[Python: detect file type]  ─── "fasta" or "fastq"
+[Python: detect file type]  ─── "fasta"
     │
     ▼
-[C++: codec encode]  ─── fasta_codec / fastq_codec (parallel, multi-threaded)
-    │  Decomposes into typed binary streams:
-    │  headers, nmask, acgtmask, bases2, exceptions, case, wrapping, [quality]
-    ▼
-[C++: OpenZL compress each stream]  ─── zli compress (serial profile or trained)
+[Python: detect subtype]  ─── detect_fasta_subtype() → "nucleotide" or "protein"
     │
     ▼
-[Python: bundle container]  ─── .zlfasta or .zlfastq (magic + CRC32)
+[C++: encode-packed / encode-protein-packed]  ─── fasta_codec (parallel)
+    │  Nucleotide: NXF2 packed binary (48B header + 36B×N metadata + 7 payloads)
+    │  Protein:    NXFP packed binary (32B header + 20B×N metadata + 4 payloads)
+    │  Multi-chunk splitting if input >500 MiB
+    ▼
+[C++: train SDDL compressor]  ─── zli train --profile sddl (if --train)
+    │  Single compressor for entire packed format
+    ▼
+[C++: compress chunks]  ─── zli compress (parallel via ThreadPoolExecutor)
+    │
+    ▼
+[Python: bundle container]  ─── .zlfasta (magic + CRC32)
     │
     ▼
 genome.fasta.zlfasta
 ```
 
-Decompression reverses the pipeline: extract container → decompress streams → C++ codec decode → byte-identical original file.
+### 2.5 Lossless Pipeline — FASTQ (Per-Stream)
+
+```
+nyx compress-lossless reads.fastq
+    │
+    ▼
+[Python: detect file type]  ─── "fastq"
+    │
+    ▼
+[C++: codec encode]  ─── fastq_codec (parallel, multi-threaded)
+    │  Decomposes into typed binary streams:
+    │  headers, nmask, acgtmask, bases2, exceptions, case, seq_wrap, qual_wrap, quality, plus
+    ▼
+[C++: OpenZL compress each stream]  ─── zli compress (serial profile or trained)
+    │
+    ▼
+[Python: bundle container]  ─── .zlfastq (magic + CRC32)
+    │
+    ▼
+reads.fastq.zlfastq
+```
+
+Decompression reverses the pipeline: extract container → decompress streams/chunks → C++ codec decode → byte-identical original file.
 
 ## 3. The Python CLI
 
@@ -195,7 +224,9 @@ compression/                              # Git repository root
     ├── .gitignore                        # Ignores openzl/, bin/, .venv/, __pycache__/, nyx_*/
     │
     ├── schemas/                          # SDDL schema definitions
-    │   └── fasta_packed.sddl             # FAV4 binary format schema (29 lines)
+    │   ├── fasta_packed.sddl             # FAV4 binary format schema (29 lines)
+    │   ├── nucleotide_fasta.sddl         # NXF2 packed binary format schema
+    │   └── protein_fasta.sddl            # NXFP protein packed binary format schema
     │
     ├── scripts/                          # Build and data-prep scripts (called by Python)
     │   ├── build.sh                      # Clones OpenZL + compiles zli + codecs + preprocessor
@@ -208,16 +239,16 @@ compression/                              # Git repository root
     │   ├── fastq_codec.cpp               # Lossless FASTQ ↔ binary streams (parallel encoding)
     │   └── genomic_preprocessor.cpp      # 886-line C++17 preprocessor (FASTA/FASTQ/VCF → binary chunks)
     │
-    ├── models/                           # Trained per-stream compressor models
-    │   ├── lossless/                     # FASTA stream compressors (*.zl_compressor)
-    │   └── lossless_fastq/               # FASTQ stream compressors (*.zl_compressor)
+    ├── models/                           # Trained compressor models
+    │   ├── lossless/                     # FASTA compressors (nucleotide_fasta.zl_compressor, protein_fasta.zl_compressor)
+    │   └── lossless_fastq/               # FASTQ per-stream compressors (*.zl_compressor)
     │
-    ├── tests/                            # Pytest test suite (121 tests)
+    ├── tests/                            # Pytest test suite (180 tests)
     │   ├── __init__.py
-    │   ├── test_lossless.py              # FASTA round-trip tests (60 tests across 4 tiers)
-    │   ├── test_lossless_fastq.py        # FASTQ round-trip tests (61 tests across 4 tiers)
+    │   ├── test_lossless.py              # FASTA round-trip tests (111 tests across 7 tiers)
+    │   ├── test_lossless_fastq.py        # FASTQ round-trip tests (69 tests across 4 tiers)
     │   └── fixtures/                     # Test input files
-    │       ├── *.fasta                   # FASTA test fixtures (edge cases, IUPAC, etc.)
+    │       ├── *.fasta                   # FASTA test fixtures (nucleotide + protein edge cases)
     │       └── *.fastq                   # FASTQ test fixtures (CRLF, no-trailing-newline, etc.)
     │
     ├── nyx/                              # Python package source (the importable module)
@@ -299,45 +330,49 @@ compression/                              # Git repository root
 
 ### 5.4 Lossless Compress Command: `nyx/nyx/commands/compress_lossless.py`
 
-- **Purpose:** Unified lossless compression for FASTA and FASTQ with byte-exact reconstruction. Auto-detects input format.
+- **Purpose:** Unified lossless compression for FASTA and FASTQ with byte-exact reconstruction. Auto-detects input format and FASTA subtype (nucleotide vs protein).
 - **Key features:**
-  - Auto-detection via `detect_filetype()` (or explicit `--type fasta`/`--type fastq`)
-  - Routes to `codec.encode()` (FASTA) or `fastq_codec.encode()` (FASTQ) for stream separation
-  - Passes `--threads` for parallel C++ encoding
-  - Per-stream compression via OpenZL (serial profile by default, trained compressors if available)
-  - Chunking for large streams (>400 MiB) to stay within zli limits
-  - Optional `--train` to train per-stream compressors (saved to `models/lossless/` or `models/lossless_fastq/`)
-  - Bundles into `.zlfasta` or `.zlfastq` container via `create_zlfasta()` / `create_zlfastq()`
+  - Auto-detection via `detect_filetype()` (or explicit `--type fasta`/`--type fastq`/`--type protein`)
+  - FASTA subtype auto-detection via `detect_fasta_subtype()` — uses E/F/I/L/P/Q heuristic
+  - **FASTA (nucleotide):** Encodes into NXF2 packed binary chunks via `codec.encode_packed()`, trains single SDDL compressor (`nucleotide_fasta.zl_compressor`), compresses all chunks in parallel
+  - **FASTA (protein):** Encodes into NXFP packed binary chunks via `codec.encode_protein_packed()`, trains single SDDL compressor (`protein_fasta.zl_compressor`), compresses all chunks in parallel
+  - **FASTQ:** Routes to per-stream compression path (legacy approach with `fastq_codec.encode()`)
+  - Group training via `--group-train-dir` — samples first chunk from each FASTA file in directory
+  - Auto-chunking for large files (>500 MiB NXF2/NXFP chunks) to stay within zli limits
+  - Bundles into `.zlfasta` or `.zlfastq` container
 
-- **Pipeline:**
+- **FASTA Pipeline (NXF2/NXFP):**
 
 ```
 input.fasta
     │
     ▼
-[detect type] → "fasta" or "fastq"
+[detect type] → "fasta" → [detect subtype] → "nucleotide" or "protein"
     │
     ▼
-[C++ codec encode] → binary streams (headers, nmask, bases2, acgtmask, exceptions, case, wrapping, [quality])
+[C++ encode-packed / encode-protein-packed] → NXF2/NXFP packed binary chunks
     │
     ▼ (optional)
-[train per-stream compressors] → *.zl_compressor models
+[train single SDDL compressor] → nucleotide_fasta.zl_compressor / protein_fasta.zl_compressor
     │
     ▼
-[OpenZL compress each stream] → .zl compressed data
+[OpenZL compress chunks in parallel] → .zl compressed chunks
     │
     ▼
 [bundle container] → input.fasta.zlfasta
 ```
 
-- **FASTA streams (7):** `headers.bin`, `nmask.bin`, `acgtmask.bin`, `bases2.bin`, `exceptions.bin`, `case.bin`, `wrapping.bin`
-- **FASTQ streams (10):** All FASTA streams (minus `wrapping.bin`) + `plus.bin`, `seq_wrap.bin`, `qual_wrap.bin`, `quality.bin`
+- **FASTQ Pipeline (per-stream):** Same as before — `fastq_codec encode` → per-stream OpenZL compression → `.zlfastq` container
 
 ### 5.5 Lossless Decompress Command: `nyx/nyx/commands/decompress_lossless.py`
 
 - **Purpose:** Unified lossless decompression from `.zlfasta` or `.zlfastq` containers. Auto-detects container type from magic bytes.
 - **Magic bytes:** `ZLFASTA\0` (8 bytes) for FASTA, `ZLFASTQ\0` (8 bytes) for FASTQ
-- **Pipeline:** Extract container → decompress streams with OpenZL → reassemble chunked streams → decode via C++ codec → original file
+- **Packed format detection:** `_is_packed_format()` checks for `chunk_*.bin` entries → routes to packed decompression path
+- **Subtype detection:** `_detect_packed_subtype()` reads magic from first decompressed chunk — "NXF2" → `codec.decode_packed()`, "NXFP" → `codec.decode_protein_packed()`
+- **Parallel decompression:** All chunks/streams decompressed in parallel via `ThreadPoolExecutor`
+- **Pipeline (packed FASTA):** Extract container → decompress all chunks in parallel → detect NXF2/NXFP → decode via C++ codec → original file
+- **Pipeline (per-stream FASTQ):** Extract container → decompress streams → reassemble chunked streams → decode via C++ codec → original file
 - **Output:** Byte-identical reconstruction of the original input file
 
 ### 5.6 C++ Lossless Codecs
@@ -353,22 +388,27 @@ input.fasta
   - Base encoding (`base_to_2bit`, `twobit_to_base`)
   - `SequenceEncoding` struct — result of encoding a sequence into N-mask, ACGT-mask, 2-bit bases, exceptions, case bits
   - `encode_sequence()` — thread-safe per-sequence encoding (no I/O)
-  - `decode_sequence()` — reconstructs raw sequence from stream buffers
+  - `decode_sequence()` — reconstructs raw sequence from stream buffers; handles absent streams via `SFLAG_NO_N`, `SFLAG_NO_IUPAC`, `SFLAG_NO_CASE` flags
   - `encode_wrapping()` / `decode_wrapping()` — line-wrap position encoding
   - `detect_newline_style()` — detects `\n` vs `\r\n` for CRLF support
+  - `detect_trailing_newline()` — detects whether file ends with a newline
+  - Stream-presence flags: `SFLAG_NO_N` (0x01), `SFLAG_NO_IUPAC` (0x02), `SFLAG_NO_CASE` (0x04) — when set, corresponding payload buffers are omitted from packed binary
+  - Case encoding constants: `CASE_NONE` (0), `CASE_MASK` (1), `CASE_SPARSE` (2) — shared by nucleotide and protein codecs
   - `mkdir_recursive()` — cross-platform directory creation
 
 #### 5.6.2 FASTA Codec: `nyx/tools/fasta_codec.cpp`
 
-- **Purpose:** Lossless FASTA ↔ binary stream encoding/decoding with parallel encoding support.
-- **Size:** ~370 lines (down from 1137 after extracting shared code to `codec_common.h`)
-- **Metadata magic:** `0x4346584E` ("NXFC")
-- **Record metadata (36 bytes):** header offset/length, sequence offset/length, raw sequence length, N count, exception count, non-N count, wrapping info
-- **3-phase parallel encoding:**
+- **Purpose:** Lossless FASTA ↔ binary encoding/decoding with parallel encoding support. Handles both nucleotide and protein FASTA.
+- **Formats supported:**
+  - **Legacy per-stream** (`encode`/`decode`): Splits into 8 individual stream files (headers, nmask, acgtmask, bases2, exceptions, case, wrapping, meta). Used by old pipeline.
+  - **NXF2 packed nucleotide** (`encode-packed`/`decode-packed`): Self-contained packed binary chunks. 48-byte `PackedHeader` + 36-byte `RecordMeta` array + 7 payload buffers. Stream-presence flags (`SFLAG_NO_N`, `SFLAG_NO_IUPAC`, `SFLAG_NO_CASE`) allow omitting empty streams.
+  - **NXFP packed protein** (`encode-protein-packed`/`decode-protein-packed`): Simpler packed binary for amino acid sequences. 32-byte `ProteinPackedHeader` + 20-byte `ProteinRecordMeta` array + 4 payload buffers (headers, seq, case, wrapping). Sequences stored as raw uppercase bytes (1 byte per AA).
+- **3-phase parallel encoding (all modes):**
   1. **Parse** (sequential): Scan mmap'd file for `>` headers + sequence data → `FastaRecord` list
-  2. **Encode** (parallel): `std::thread` workers call `encode_one()` per record — thread-safe, no shared state
-  3. **Write** (sequential): Concatenate per-record results into 8 stream files — deterministic output regardless of thread count
-- **CLI:** `fasta_codec encode|decode|validate <args> [num_threads]`
+  2. **Encode** (parallel): `std::thread` workers call `encode_one()` / `encode_protein_one()` per record — thread-safe, no shared state
+  3. **Write** (sequential): Concatenate per-record results into packed binary or stream files — deterministic output regardless of thread count
+- **Multi-chunk splitting:** `encode-packed` and `encode-protein-packed` accept `num_chunks` parameter, split records across multiple `chunk_NNNNNN.bin` files (required for >500 MiB inputs due to zli limit)
+- **CLI:** `fasta_codec encode|decode|validate|encode-packed|decode-packed|encode-protein-packed|decode-protein-packed <args> [num_threads|num_chunks]`
 
 #### 5.6.3 FASTQ Codec: `nyx/tools/fastq_codec.cpp`
 
@@ -407,7 +447,9 @@ input.fasta
 
 ### 5.7 Lossless Stream Encoding — Detailed Algorithm
 
-For each sequence in a FASTA/FASTQ record, `encode_sequence()` produces:
+#### Nucleotide Encoding
+
+For each sequence in a nucleotide FASTA/FASTQ record, `encode_sequence()` produces:
 
 1. **N-mask (`nmask.bin`):** L bits, one per base. `1` = position is N/n, `0` = non-N.
 2. **S_nonN construction:** Remove all N positions from the sequence → S_nonN (length L').
@@ -419,12 +461,23 @@ For each sequence in a FASTA/FASTQ record, `encode_sequence()` produces:
 
 This decomposition achieves high compression because each stream has low entropy and consistent patterns (e.g., 2-bit bases are ~2 bits/base instead of 8, N-mask is sparse for clean genomes).
 
+#### Protein Encoding
+
+For each sequence in a protein FASTA record, `encode_protein_one()` produces:
+
+1. **Uppercase sequence (`seq_buf`):** Raw uppercase bytes (1 byte per amino acid). Full alphabet: 20 standard AAs + X, *, -, B, Z, J, U, O.
+2. **Case bits (`case_buf`):** Same encoding as nucleotide (CASE_NONE/CASE_MASK/CASE_SPARSE from `codec_common.h`).
+3. **Wrapping (`wrapping_buf`):** Same as nucleotide (`encode_wrapping()` from `codec_common.h`).
+
+Protein encoding is simpler than nucleotide — no N-mask, ACGT-mask, 2-bit bases, or IUPAC exceptions. The raw uppercase byte representation lets OpenZL learn the amino acid frequency distribution via SDDL training.
+
 ### 5.8 Container Formats
 
 #### `.zlfasta` container
 
 - **Magic:** `ZLFASTA\0` (8 bytes)
-- **Entries:** 7 compressed streams + `meta.bin` (uncompressed record metadata)
+- **Entries (packed format):** One or more compressed `chunk_NNNNNN.bin` entries (each a compressed NXF2 or NXFP packed binary)
+- **Entries (legacy format):** 7 compressed streams + `meta.bin` (uncompressed record metadata)
 - **Structure:** Magic + entry count (u32) + per-entry headers (name length, name, original size, compressed size) + entry data + CRC32 footer
 - **Module:** `nyx/nyx/core/zlfasta.py` — `create_zlfasta()`, `extract_zlfasta()`
 
@@ -464,7 +517,7 @@ This decomposition achieves high compression because each stream has low entropy
 
 ### 5.11 File Type Detection: `nyx/nyx/core/detect.py`
 
-- **Purpose:** Auto-detects whether an input file is FASTA, FASTQ, VCF, or unknown.
+- **Purpose:** Auto-detects whether an input file is FASTA, FASTQ, VCF, or unknown. Also detects FASTA subtype (nucleotide vs protein).
 - **Strategy:** Content-first (reads first 1KB), then extension fallback.
 - **Detection rules:**
 
@@ -477,6 +530,12 @@ This decomposition achieves high compression because each stream has low entropy
 | 5 | Extension in `{.fastq, .fq}` | `"fastq"` |
 | 6 | Extension `.vcf` | `"vcf"` |
 | 7 | None of the above | `None` (generic) |
+
+- **FASTA subtype detection** (`detect_fasta_subtype()`):
+  - Reads first 10KB, scans sequence lines (non-header lines)
+  - If any character in `{E, F, I, L, P, Q}` (amino acids NOT valid IUPAC nucleotide codes) → `"protein"`
+  - Otherwise → `"nucleotide"`
+  - Standard bioinformatics heuristic; case-insensitive
 
 ### 5.12 Archive Module: `nyx/nyx/core/archive.py`
 
@@ -555,12 +614,26 @@ chunks/
 - **CLI:** `genomic_preprocessor <input_file> <output_dir> <num_threads> [type]`
 - **Output:** `chunk_NNNNN.<format>.bin` files in the output directory
 
-### 5.17 SDDL Schema: `nyx/schemas/fasta_packed.sddl`
+### 5.17 SDDL Schemas: `nyx/schemas/`
+
+#### `fasta_packed.sddl`
 
 - **Purpose:** Defines the FAV4 binary wire format consumed by `zli train --profile sddl`.
 - **Fields:** `magic` (Byte[4]), `num_records` (U32), `hdr_offsets` (U32[N+1]), `seq_offsets` (U32[N+1]), `seq_lengths` (U32[N]), `hdr_total` (U32), `seq_total` (U32), `hdr_pad` (U32), `seq_pad` (U32), `headers` (Byte[...]), `sequences` (Byte[...]), `: Byte[_rem]` (permissive trailer).
 - **All integers:** Little-endian 32-bit unsigned (`U32 = UInt32LE`).
 - **Why this matters:** By teaching OpenZL the field types, it can learn separate compression models for each — delta coding for monotonic offset arrays, specialized models for the constrained 5-symbol packed alphabet, etc.
+
+#### `nucleotide_fasta.sddl`
+
+- **Purpose:** Defines the NXF2 packed binary format for nucleotide FASTA.
+- **Structure:** 48-byte `PackedHeader` (magic, version, num_records, newline_style, has_trailing_nl, stream_flags, reserved, 7 total_* size fields) → `RecordMeta[num_records]` (36 bytes each: seq_len, hdr_len, raw_seq_len, n_count, except_count, non_n_count, nmask_bytes, acgtmask_bytes, case_bytes, wrapping_bytes, bases2_bytes, case_mode, pad) → 7 payload buffers (hdr, nmask, acgtmask, bases2, exceptions, case, wrapping) → `Byte[_rem]`.
+- **Stream-presence flags:** `stream_flags` field controls which payload buffers are present; absent buffers have zero total size.
+
+#### `protein_fasta.sddl`
+
+- **Purpose:** Defines the NXFP packed binary format for protein FASTA.
+- **Structure:** 32-byte `ProteinPackedHeader` (magic "NXFP", version, num_records, newline_style, has_trailing_nl, stream_flags, reserved, 4 total_* size fields) → `ProteinRecordMeta[num_records]` (20 bytes each: seq_len, hdr_len, case_bytes, wrap_bytes, case_mode, pad) → 4 payload buffers (hdr, seq, case, wrapping) → `Byte[_rem]`.
+- **Protein sequences:** Stored as raw uppercase bytes (1 byte per amino acid) — OpenZL learns the AA frequency distribution via SDDL training.
 
 ### 5.18 Build Script: `nyx/scripts/build.sh`
 
@@ -836,47 +909,56 @@ nyx list-profiles
 5. **Decompress each:** `openzl.decompress(chunk, out_file)` → subprocess: `zli decompress <chunk> --output <out>`
 6. **Output:** Decompressed binary chunks in output directory
 
-### 12.3 `nyx compress-lossless genome.fasta`
+### 12.3 `nyx compress-lossless genome.fasta` (FASTA — packed NXF2/NXFP)
 
 1. **CLI parsing:** `compress_lossless_cmd()` — parses Click args
 2. **Type detection:** `detect_filetype(input_path)` → `"fasta"` (or `--type` override)
-3. **Encode:** `codec.encode(input_path, streams_dir, threads=N)` → subprocess: `fasta_codec encode <input> <dir> [threads]` → 8 stream files
-4. **Train (if `--train`):** For each compressible stream, probe with serial profile → if ratio < 100x, train dedicated compressor → save to `models/lossless/`
-5. **Compress streams:** For each compressible stream: split if >400 MiB → `openzl.compress()` with trained compressor or serial profile → `.zl` data
-6. **Bundle:** `create_zlfasta(output_path, entries)` → `.zlfasta` container with magic bytes + CRC32
+3. **Subtype detection:** `detect_fasta_subtype(input_path)` → `"nucleotide"` or `"protein"` (or `--type protein` override)
+4. **Encode-packed:** `codec.encode_packed()` or `codec.encode_protein_packed()` → subprocess: `fasta_codec encode-packed <input> <dir> [chunks]` → NXF2/NXFP packed binary chunk files
+5. **Auto-chunking:** If any chunk >500 MiB, re-encode with more chunks
+6. **Train (if `--train`):** `openzl.train(profile="sddl", profile_arg=<sddl>)` → trains single compressor on packed binary sample → saves `nucleotide_fasta.zl_compressor` or `protein_fasta.zl_compressor` to `models/lossless/`
+7. **Compress chunks:** Parallel `openzl.compress()` with trained compressor or serial fallback → `.zl` data
+8. **Bundle:** `create_zlfasta(output_path, entries)` → `.zlfasta` container with magic bytes + CRC32
 
 ### 12.4 `nyx decompress-lossless genome.fasta.zlfasta`
 
 1. **CLI parsing:** `decompress_lossless_cmd()` — parses args
 2. **Detect container:** Read first 8 bytes → `ZLFASTA\0` → format = "fasta"
-3. **Extract:** `extract_zlfasta(input_path, extract_dir)` → individual stream files
-4. **Decompress:** For each compressible stream: `openzl.decompress()` → decompressed stream data
-5. **Reassemble chunks:** Concatenate chunked streams (e.g., `bases2.bin.000`, `bases2.bin.001` → `bases2.bin`)
-6. **Decode:** `codec.decode(streams_dir, output_path)` → subprocess: `fasta_codec decode <dir> <output>` → byte-identical original file
+3. **Extract:** `extract_zlfasta(input_path, extract_dir)` → individual entry files
+4. **Detect packed format:** `_is_packed_format()` checks for `chunk_*.bin` entries
+5. **Decompress chunks:** Parallel `openzl.decompress()` for all chunks → decompressed packed binary
+6. **Detect subtype:** `_detect_packed_subtype()` reads magic from first chunk — "NXF2" → nucleotide, "NXFP" → protein
+7. **Decode:** `codec.decode_packed()` or `codec.decode_protein_packed()` → subprocess: `fasta_codec decode-packed <dir> <output>` → byte-identical original file
 
 ## 13. Testing
 
 ### 13.1 Current State
 
-The project has **121 automated tests** covering lossless compression round-trips:
+The project has **180 automated tests** covering lossless compression round-trips:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
-| `nyx/tests/test_lossless.py` | 60 | FASTA lossless encode/decode round-trips |
-| `nyx/tests/test_lossless_fastq.py` | 61 | FASTQ lossless encode/decode round-trips |
+| `nyx/tests/test_lossless.py` | 111 | FASTA lossless encode/decode round-trips (nucleotide + protein) |
+| `nyx/tests/test_lossless_fastq.py` | 69 | FASTQ lossless encode/decode round-trips |
 
 ### 13.2 Test Architecture
 
-Tests are organized in 4 tiers:
+Tests are organized in 7 tiers (FASTA) / 4 tiers (FASTQ):
 
-1. **Fixture round-trips:** Each test fixture (e.g., `minimal.fasta`, `iupac_ambiguity.fastq`) is encoded into streams, decoded back, and compared byte-for-byte against the original.
-2. **Programmatic edge cases:** Synthetic inputs generated in Python (empty sequences, single-base, long sequences, maximum line wrapping, etc.).
+1. **Fixture round-trips:** Each test fixture encoded into streams/packed binary, decoded back, compared byte-for-byte.
+2. **Programmatic edge cases:** Synthetic inputs generated in Python (empty sequences, single-base, long sequences, etc.).
 3. **Validation tests:** Run the C++ codec's `validate` command on each fixture to verify stream invariants.
 4. **Multi-threaded round-trips:** Same as tier 1 but with `--threads 4` to verify parallel encoding produces identical output.
+5. **Protein codec round-trips:** `encode-protein-packed` → `decode-protein-packed` for protein fixtures, including multi-chunk splitting and NXFP binary structure validation.
+5b. **Protein edge cases:** Single AA, all lowercase, all uppercase, stops, gaps, X chars, empty sequence, no trailing newline.
+6. **FASTA subtype detection:** Verifies `detect_fasta_subtype()` correctly identifies nucleotide vs protein fixtures.
+7. **Protein full pipeline:** Full `compress-lossless --type protein` → `decompress-lossless` round-trip with byte-identical verification.
 
 ### 13.3 Test Fixtures
 
-**FASTA fixtures** (`nyx/tests/fixtures/*.fasta`): minimal, multi-record, wrapped sequences, mixed case, IUPAC ambiguity codes, long sequences, edge cases, CRLF line endings, no trailing newline.
+**Nucleotide FASTA fixtures** (`nyx/tests/fixtures/*.fasta`): minimal, multi-record, wrapped sequences, mixed case, IUPAC ambiguity codes, long sequences, edge cases, CRLF line endings, no trailing newline.
+
+**Protein FASTA fixtures** (`nyx/tests/fixtures/protein_*.fasta`): basic (hemoglobin, insulin, titin, SARS-CoV-2 spike), extended (B/Z/J/U/O/X chars, stops, gaps, single AA, all lowercase, unusual wrapping, empty sequence, long headers).
 
 **FASTQ fixtures** (`nyx/tests/fixtures/*.fastq`): minimal, multi-record, wrapped reads, mixed case, IUPAC ambiguity, varying quality scores, long reads, plus-line comments, edge cases, CRLF line endings, no trailing newline.
 

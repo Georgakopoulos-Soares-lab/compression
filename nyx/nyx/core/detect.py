@@ -65,6 +65,36 @@ def detect_filetype(filepath: Path) -> Optional[str]:
     return detect_by_extension(filepath)
 
 
+def detect_fasta_subtype(filepath: Path) -> str:
+    """Detect whether a FASTA file contains nucleotide or protein sequences.
+
+    Reads the first ~10KB, scans sequence lines (non-header lines).
+    If any sequence character is in {E, F, I, L, P, Q} (amino acids
+    that are NOT valid IUPAC nucleotide codes), returns "protein".
+    Otherwise returns "nucleotide".
+    """
+    # Characters that are amino acids but NOT IUPAC nucleotide codes
+    PROTEIN_ONLY = set('EFILPQefilpq')
+
+    try:
+        with open(filepath, "rb") as f:
+            head = f.read(10240)
+    except OSError:
+        return "nucleotide"
+
+    for line in head.split(b"\n"):
+        line = line.rstrip(b"\r")
+        # Skip header lines and empty lines
+        if not line or line.startswith(b">"):
+            continue
+        # Check sequence characters
+        for ch in line:
+            if chr(ch) in PROTEIN_ONLY:
+                return "protein"
+
+    return "nucleotide"
+
+
 def is_genomic(filetype: Optional[str]) -> bool:
     """Check if a file type is a supported genomic format."""
     return filetype in ("fasta", "fastq", "vcf")

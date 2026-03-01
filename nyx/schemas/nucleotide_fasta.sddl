@@ -1,0 +1,48 @@
+U32 = UInt32LE
+
+# NXF2: Nucleotide FASTA Packed Binary
+# Each chunk file is a self-contained binary with header, per-record
+# metadata, and concatenated payload buffers for all encoded streams.
+
+magic          : Byte[4]
+version        : U32
+num_records    : U32
+newline_style  : UInt8
+has_trailing   : UInt8
+stream_flags   : UInt8
+_reserved1     : Byte[1]
+total_hdr      : U32
+total_nmask    : U32
+total_acgt     : U32
+total_bases    : U32
+total_exc      : U32
+total_case     : U32
+total_wrap     : U32
+_reserved2     : Byte[4]
+
+# Per-record metadata (36 bytes each, matching RecordMeta struct)
+RecordMeta = {
+  seq_len      : U32
+  hdr_len      : U32
+  nmask_bytes  : U32
+  acgt_bytes   : U32
+  bases_bytes  : U32
+  exc_bytes    : U32
+  case_bytes   : U32
+  wrap_bytes   : U32
+  case_mode    : UInt8
+  _pad         : Byte[3]
+}
+
+metadata       : RecordMeta[num_records]
+
+# Payload buffers (sizes from global header)
+hdr_data       : Byte[total_hdr]
+nmask_data     : Byte[total_nmask]
+acgt_data      : Byte[total_acgt]
+bases_data     : Byte[total_bases]
+exc_data       : Byte[total_exc]
+case_data      : Byte[total_case]
+wrap_data      : Byte[total_wrap]
+
+: Byte[_rem]

@@ -20,6 +20,7 @@
 
 #include "codec_common.h"
 #include <atomic>
+#include <dirent.h>
 #include <thread>
 
 // ============================================================================
@@ -29,7 +30,41 @@
 static constexpr u32 META_MAGIC   = 0x4346584E; // "NXFC" little-endian
 static constexpr u32 META_VERSION = 1;
 
+// NXF2 packed binary format: all streams in one file with SDDL schema
+static constexpr char NXF2_MAGIC[4] = {'N', 'X', 'F', '2'};
+static constexpr u32  NXF2_VERSION  = 2;
+
+// Stream-presence flags (stored in PackedHeader.stream_flags).
+// When a flag is set, the corresponding stream is ABSENT from the binary
+// because the data is trivially reconstructable (all-zero nmask, all-one
+// acgtmask, or no case variation).  Old files have stream_flags=0 which
+// means all streams are present — backward compatible.
+static constexpr u8 SFLAG_NO_N     = 0x01; // no N's in any record → skip nmask
+static constexpr u8 SFLAG_NO_IUPAC = 0x02; // no IUPAC codes → skip acgtmask + exceptions
+static constexpr u8 SFLAG_NO_CASE  = 0x04; // no case variation → skip case
+
 #pragma pack(push, 1)
+
+struct PackedHeader {
+    char magic[4];          // "NXF2"
+    u32  version;           // 2
+    u32  num_records;
+    u8   newline_style;     // 0=LF, 1=CRLF
+    u8   has_trailing_nl;   // 0 or 1
+    u8   stream_flags;      // SFLAG_* bits for absent streams
+    u8   _reserved1;
+    u32  total_hdr;         // sum of all header_len
+    u32  total_nmask;       // sum of all nmask_bytes (0 if SFLAG_NO_N)
+    u32  total_acgt;        // sum of all acgtmask_bytes (0 if SFLAG_NO_IUPAC)
+    u32  total_bases;       // sum of all bases2_bytes
+    u32  total_exc;         // sum of all exceptions_bytes (0 if SFLAG_NO_IUPAC)
+    u32  total_case;        // sum of all case_bytes (0 if SFLAG_NO_CASE)
+    u32  total_wrap;        // sum of all wrap_bytes
+    u8   reserved2[4];
+};
+
+static_assert(sizeof(PackedHeader) == 48, "PackedHeader must be 48 bytes");
+
 struct RecordMeta {
     u32 seq_len;          // L: total sequence length (chars, no line breaks)
     u32 header_len;       // header bytes (without leading '>')
@@ -45,6 +80,53 @@ struct RecordMeta {
 #pragma pack(pop)
 
 static_assert(sizeof(RecordMeta) == 36, "RecordMeta must be 36 bytes");
+
+// NXFP packed binary format: protein FASTA (simpler — raw AA bytes)
+static constexpr char NXFP_MAGIC[4] = {'N', 'X', 'F', 'P'};
+static constexpr u32  NXFP_VERSION  = 1;
+
+#pragma pack(push, 1)
+
+struct ProteinPackedHeader {
+    char magic[4];          // "NXFP"
+    u32  version;           // 1
+    u32  num_records;
+    u8   newline_style;     // 0=LF, 1=CRLF
+    u8   has_trailing_nl;   // 0 or 1
+    u8   stream_flags;      // SFLAG_NO_CASE
+    u8   _reserved1;
+    u32  total_hdr;         // sum of all header_len
+    u32  total_seq;         // sum of all seq_len (raw uppercase bytes)
+    u32  total_case;        // sum of all case_bytes (0 if SFLAG_NO_CASE)
+    u32  total_wrap;        // sum of all wrap_bytes
+};
+
+static_assert(sizeof(ProteinPackedHeader) == 32, "ProteinPackedHeader must be 32 bytes");
+
+struct ProteinRecordMeta {
+    u32 seq_len;
+    u32 hdr_len;
+    u32 case_bytes;
+    u32 wrap_bytes;
+    u8  case_mode;
+    u8  pad[3];
+};
+
+static_assert(sizeof(ProteinRecordMeta) == 20, "ProteinRecordMeta must be 20 bytes");
+
+#pragma pack(pop)
+
+// ============================================================================
+// Protein encoded record buffers
+// ============================================================================
+
+struct ProteinEncodedRecord {
+    ProteinRecordMeta meta;
+    std::vector<u8> header_buf;
+    std::vector<u8> seq_buf;      // raw uppercase amino acid bytes
+    std::vector<u8> case_buf;
+    std::vector<u8> wrapping_buf;
+};
 
 // ============================================================================
 // Parsed FASTA record
@@ -146,6 +228,64 @@ static EncodedRecord encode_one(const FastaRecord& rec) {
     er.meta.wrap_bytes = static_cast<u32>(er.wrapping_buf.size());
 
     return er;
+}
+
+// ============================================================================
+// Encode a single protein record into buffers (thread-safe, no I/O)
+// ============================================================================
+
+static ProteinEncodedRecord encode_protein_one(const FastaRecord& rec) {
+    ProteinEncodedRecord pr{};
+    const std::string& seq = rec.raw_seq;
+    u32 L = static_cast<u32>(seq.size());
+
+    pr.meta.seq_len = L;
+    pr.meta.hdr_len = static_cast<u32>(rec.header.size());
+
+    // Header bytes
+    pr.header_buf.assign(rec.header.begin(), rec.header.end());
+
+    // Sequence: store as raw uppercase bytes
+    pr.seq_buf.resize(L);
+    for (u32 i = 0; i < L; i++) {
+        char c = seq[i];
+        if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+        pr.seq_buf[i] = static_cast<u8>(c);
+    }
+
+    // Case preservation (reuse same CASE_NONE/CASE_MASK/CASE_SPARSE logic)
+    u32 count_lower = 0;
+    for (u32 i = 0; i < L; i++) {
+        if (seq[i] >= 'a' && seq[i] <= 'z') count_lower++;
+    }
+
+    if (count_lower == 0) {
+        pr.meta.case_mode = CASE_NONE;
+    } else if (L > 0 && count_lower < L / 16) {
+        pr.meta.case_mode = CASE_SPARSE;
+        encode_varint(pr.case_buf, count_lower);
+        u32 prev = 0;
+        for (u32 i = 0; i < L; i++) {
+            if (seq[i] >= 'a' && seq[i] <= 'z') {
+                encode_varint(pr.case_buf, i - prev);
+                prev = i;
+            }
+        }
+    } else {
+        pr.meta.case_mode = CASE_MASK;
+        std::vector<bool> case_bits(L);
+        for (u32 i = 0; i < L; i++) {
+            if (seq[i] >= 'a' && seq[i] <= 'z') case_bits[i] = true;
+        }
+        pr.case_buf = pack_bits(case_bits);
+    }
+    pr.meta.case_bytes = static_cast<u32>(pr.case_buf.size());
+
+    // Wrapping (reuse existing helper)
+    pr.wrapping_buf = encode_wrapping(rec.line_lengths, L);
+    pr.meta.wrap_bytes = static_cast<u32>(pr.wrapping_buf.size());
+
+    return pr;
 }
 
 // ============================================================================
@@ -556,15 +696,639 @@ static int do_validate(const char* streams_dir) {
 }
 
 // ============================================================================
+// ENCODE-PACKED — produce NXF2 packed binary (all streams in one file)
+// ============================================================================
+
+static int do_encode_packed(const char* input_path, const char* output_dir, int num_chunks) {
+    MappedFile mf;
+    if (!mf.open(input_path)) return 1;
+    if (mf.size == 0) { fprintf(stderr, "Input file is empty\n"); return 1; }
+
+    u8 newline_style = detect_newline_style(mf.data, mf.size);
+    u8 has_trailing_nl = detect_trailing_newline(mf.data, mf.size);
+
+    mkdir_recursive(output_dir);
+
+    // Find chunk boundaries snapped to record starts (lines starting with '>')
+    std::vector<size_t> chunk_starts;
+    chunk_starts.push_back(0);
+
+    if (num_chunks > 1) {
+        size_t chunk_size = mf.size / num_chunks;
+        for (int c = 1; c < num_chunks; c++) {
+            size_t target = c * chunk_size;
+            // Scan forward to next record boundary
+            while (target < mf.size) {
+                if (mf.data[target] == '>' &&
+                    (target == 0 || mf.data[target - 1] == '\n')) {
+                    break;
+                }
+                target++;
+            }
+            if (target < mf.size && target > chunk_starts.back()) {
+                chunk_starts.push_back(target);
+            }
+        }
+    }
+    chunk_starts.push_back(mf.size); // sentinel
+    int actual_chunks = static_cast<int>(chunk_starts.size()) - 1;
+
+    for (int c = 0; c < actual_chunks; c++) {
+        size_t start = chunk_starts[c];
+        size_t end   = chunk_starts[c + 1];
+
+        // Parse all records in this chunk
+        std::vector<FastaRecord> records;
+        size_t pos = start;
+        parse_batch(mf.data, end, pos, records, UINT32_MAX);
+
+        u32 num_records = static_cast<u32>(records.size());
+        if (num_records == 0) continue;
+
+        // Encode all records
+        std::vector<EncodedRecord> encoded(num_records);
+        for (u32 i = 0; i < num_records; i++) {
+            encoded[i] = encode_one(records[i]);
+        }
+        // Free parsed records (no longer needed)
+        records.clear();
+        records.shrink_to_fit();
+
+        // ----------------------------------------------------------
+        // Detect which streams are actually needed for this chunk.
+        // If a stream is trivial (all-zero nmask, all-one acgtmask,
+        // no case variation), we can omit it from the binary.
+        // ----------------------------------------------------------
+        bool has_any_n = false;
+        bool has_any_iupac = false;
+        bool has_any_case = false;
+
+        for (u32 i = 0; i < num_records; i++) {
+            if (encoded[i].meta.exceptions_bytes > 0)
+                has_any_iupac = true;
+            if (encoded[i].meta.case_mode != CASE_NONE)
+                has_any_case = true;
+            if (!has_any_n) {
+                for (u8 b : encoded[i].nmask_buf) {
+                    if (b != 0) { has_any_n = true; break; }
+                }
+            }
+            if (has_any_n && has_any_iupac && has_any_case)
+                break; // all flags set, no need to keep scanning
+        }
+
+        u8 stream_flags = 0;
+
+        if (!has_any_n) {
+            stream_flags |= SFLAG_NO_N;
+            for (u32 i = 0; i < num_records; i++) {
+                encoded[i].nmask_buf.clear();
+                encoded[i].meta.nmask_bytes = 0;
+            }
+            fprintf(stderr, "    [opt] No N bases detected — omitting nmask stream\n");
+        }
+        if (!has_any_iupac) {
+            stream_flags |= SFLAG_NO_IUPAC;
+            for (u32 i = 0; i < num_records; i++) {
+                encoded[i].acgtmask_buf.clear();
+                encoded[i].exceptions_buf.clear();
+                encoded[i].meta.acgtmask_bytes = 0;
+                encoded[i].meta.exceptions_bytes = 0;
+            }
+            fprintf(stderr, "    [opt] No IUPAC codes detected — omitting acgtmask+exceptions streams\n");
+        }
+        if (!has_any_case) {
+            stream_flags |= SFLAG_NO_CASE;
+            // case_bytes is already 0 for all records (case_mode=CASE_NONE)
+            fprintf(stderr, "    [opt] No case variation detected — omitting case stream\n");
+        }
+
+        // Build PackedHeader with totals
+        PackedHeader hdr{};
+        memcpy(hdr.magic, NXF2_MAGIC, 4);
+        hdr.version     = NXF2_VERSION;
+        hdr.num_records = num_records;
+        hdr.newline_style   = newline_style;
+        hdr.stream_flags    = stream_flags;
+        // Only the last chunk preserves the original trailing-nl flag;
+        // intermediate chunks always end with a newline.
+        hdr.has_trailing_nl = (c == actual_chunks - 1) ? has_trailing_nl : 1;
+
+        for (u32 i = 0; i < num_records; i++) {
+            const auto& m = encoded[i].meta;
+            hdr.total_hdr   += m.header_len;
+            hdr.total_nmask += m.nmask_bytes;
+            hdr.total_acgt  += m.acgtmask_bytes;
+            hdr.total_bases += m.bases2_bytes;
+            hdr.total_exc   += m.exceptions_bytes;
+            hdr.total_case  += m.case_bytes;
+            hdr.total_wrap  += m.wrap_bytes;
+        }
+
+        // Write chunk file
+        char chunk_name[512];
+        snprintf(chunk_name, sizeof(chunk_name), "%s/chunk_%06d.bin", output_dir, c);
+        FILE* out = fopen(chunk_name, "wb");
+        if (!out) { fprintf(stderr, "Cannot create %s\n", chunk_name); return 1; }
+
+        // Header (48 bytes)
+        fwrite(&hdr, sizeof(PackedHeader), 1, out);
+
+        // Metadata array (num_records × 36 bytes)
+        for (u32 i = 0; i < num_records; i++) {
+            fwrite(&encoded[i].meta, sizeof(RecordMeta), 1, out);
+        }
+
+        // Payload buffers — each buffer is all records' data concatenated
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].header_buf.data(), encoded[i].header_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].nmask_buf.data(), encoded[i].nmask_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].acgtmask_buf.data(), encoded[i].acgtmask_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].bases2_buf.data(), encoded[i].bases2_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].exceptions_buf.data(), encoded[i].exceptions_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].case_buf.data(), encoded[i].case_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].wrapping_buf.data(), encoded[i].wrapping_buf.size());
+
+        fclose(out);
+        fprintf(stderr, "  chunk %d: %u records, packed size %zu bytes\n",
+                c, num_records,
+                sizeof(PackedHeader) + num_records * sizeof(RecordMeta)
+                + hdr.total_hdr + hdr.total_nmask + hdr.total_acgt
+                + hdr.total_bases + hdr.total_exc + hdr.total_case + hdr.total_wrap);
+    }
+
+    fprintf(stderr, "Encoded into %d chunk(s), newline=%s, trailing_nl=%d\n",
+            actual_chunks, newline_style == NL_CRLF ? "CRLF" : "LF", has_trailing_nl);
+    return 0;
+}
+
+// ============================================================================
+// DECODE-PACKED — reconstruct FASTA from NXF2 packed binary chunk(s)
+// ============================================================================
+
+static int do_decode_packed(const char* input_arg, const char* output_path) {
+    // Find chunk files: input_arg can be a directory or a single file
+    std::vector<std::string> chunk_files;
+
+    struct stat st;
+    if (stat(input_arg, &st) != 0) {
+        fprintf(stderr, "Cannot access %s\n", input_arg);
+        return 1;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR* d = opendir(input_arg);
+        if (!d) { fprintf(stderr, "Cannot open directory %s\n", input_arg); return 1; }
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.size() > 4 &&
+                name.compare(0, 6, "chunk_") == 0 &&
+                name.compare(name.size() - 4, 4, ".bin") == 0) {
+                chunk_files.push_back(std::string(input_arg) + "/" + name);
+            }
+        }
+        closedir(d);
+        std::sort(chunk_files.begin(), chunk_files.end());
+    } else {
+        chunk_files.push_back(input_arg);
+    }
+
+    if (chunk_files.empty()) {
+        fprintf(stderr, "No chunk files found in %s\n", input_arg);
+        return 1;
+    }
+
+    FILE* out = fopen(output_path, "wb");
+    if (!out) { fprintf(stderr, "Cannot create %s\n", output_path); return 1; }
+
+    u32 total_decoded = 0;
+
+    for (size_t ci = 0; ci < chunk_files.size(); ci++) {
+        auto file_data = read_file_bytes(chunk_files[ci]);
+
+        if (file_data.size() < sizeof(PackedHeader)) {
+            fprintf(stderr, "Chunk %s too small (%zu bytes)\n",
+                    chunk_files[ci].c_str(), file_data.size());
+            fclose(out);
+            return 1;
+        }
+
+        PackedHeader hdr;
+        memcpy(&hdr, file_data.data(), sizeof(PackedHeader));
+
+        if (memcmp(hdr.magic, NXF2_MAGIC, 4) != 0) {
+            fprintf(stderr, "Bad magic in %s\n", chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+        if (hdr.version != NXF2_VERSION) {
+            fprintf(stderr, "Unsupported version %u in %s\n",
+                    hdr.version, chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+
+        u32 num_records = hdr.num_records;
+        const char* nl = (hdr.newline_style == NL_CRLF) ? "\r\n" : "\n";
+        size_t nl_len = (hdr.newline_style == NL_CRLF) ? 2 : 1;
+
+        // Read metadata array
+        size_t meta_offset = sizeof(PackedHeader);
+        size_t meta_size = num_records * sizeof(RecordMeta);
+        if (file_data.size() < meta_offset + meta_size) {
+            fprintf(stderr, "Truncated metadata in %s\n", chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+
+        std::vector<RecordMeta> metas(num_records);
+        memcpy(metas.data(), file_data.data() + meta_offset, meta_size);
+
+        // Payload buffers start right after metadata
+        const u8* payload = file_data.data() + meta_offset + meta_size;
+
+        // Compute offsets into the payload for each buffer type
+        // Layout: [hdr_data][nmask_data][acgt_data][bases_data][exc_data][case_data][wrap_data]
+        size_t off_hdr  = 0;
+        size_t off_nm   = hdr.total_hdr;
+        size_t off_am   = off_nm + hdr.total_nmask;
+        size_t off_b2   = off_am + hdr.total_acgt;
+        size_t off_ex   = off_b2 + hdr.total_bases;
+        size_t off_cs   = off_ex + hdr.total_exc;
+        size_t off_wr   = off_cs + hdr.total_case;
+
+        // Per-record cursors within each buffer
+        size_t cur_hdr = 0, cur_nm = 0, cur_am = 0, cur_b2 = 0;
+        size_t cur_ex = 0, cur_cs = 0, cur_wr = 0;
+
+        for (u32 r = 0; r < num_records; r++) {
+            const RecordMeta& rm = metas[r];
+
+            // Write header
+            fwrite(">", 1, 1, out);
+            fwrite(payload + off_hdr + cur_hdr, 1, rm.header_len, out);
+            fwrite(nl, 1, nl_len, out);
+            cur_hdr += rm.header_len;
+
+            u32 L = rm.seq_len;
+
+            // Decode sequence
+            auto raw_seq = decode_sequence(
+                L,
+                payload + off_nm + cur_nm, rm.nmask_bytes,
+                payload + off_am + cur_am, rm.acgtmask_bytes,
+                payload + off_b2 + cur_b2, rm.bases2_bytes,
+                payload + off_ex + cur_ex, rm.exceptions_bytes,
+                payload + off_cs + cur_cs, rm.case_bytes, rm.case_mode);
+
+            cur_nm += rm.nmask_bytes;
+            cur_am += rm.acgtmask_bytes;
+            cur_b2 += rm.bases2_bytes;
+            cur_ex += rm.exceptions_bytes;
+            cur_cs += rm.case_bytes;
+
+            // Decode wrapping
+            auto line_lengths = decode_wrapping(
+                payload + off_wr + cur_wr, rm.wrap_bytes, L);
+            cur_wr += rm.wrap_bytes;
+
+            // Write sequence lines
+            u32 seq_pos = 0;
+            for (size_t k = 0; k < line_lengths.size(); k++) {
+                u32 ll = line_lengths[k];
+                fwrite(raw_seq.data() + seq_pos, 1, ll, out);
+                seq_pos += ll;
+
+                bool is_last = (r == num_records - 1) && (k == line_lengths.size() - 1);
+                if (is_last && !hdr.has_trailing_nl) {
+                    // Omit trailing newline
+                } else {
+                    fwrite(nl, 1, nl_len, out);
+                }
+            }
+        }
+
+        total_decoded += num_records;
+        fprintf(stderr, "  chunk %zu: decoded %u records\n", ci, num_records);
+    }
+
+    fclose(out);
+    fprintf(stderr, "Decoded %u records total from %zu chunk(s)\n",
+            total_decoded, chunk_files.size());
+    return 0;
+}
+
+// ============================================================================
+// ENCODE-PROTEIN-PACKED — produce NXFP packed binary (protein FASTA)
+// ============================================================================
+
+static int do_encode_protein_packed(const char* input_path, const char* output_dir, int num_chunks) {
+    MappedFile mf;
+    if (!mf.open(input_path)) return 1;
+    if (mf.size == 0) { fprintf(stderr, "Input file is empty\n"); return 1; }
+
+    u8 newline_style = detect_newline_style(mf.data, mf.size);
+    u8 has_trailing_nl = detect_trailing_newline(mf.data, mf.size);
+
+    mkdir_recursive(output_dir);
+
+    // Find chunk boundaries snapped to record starts (lines starting with '>')
+    std::vector<size_t> chunk_starts;
+    chunk_starts.push_back(0);
+
+    if (num_chunks > 1) {
+        size_t chunk_size = mf.size / num_chunks;
+        for (int c = 1; c < num_chunks; c++) {
+            size_t target = c * chunk_size;
+            while (target < mf.size) {
+                if (mf.data[target] == '>' &&
+                    (target == 0 || mf.data[target - 1] == '\n')) {
+                    break;
+                }
+                target++;
+            }
+            if (target < mf.size && target > chunk_starts.back()) {
+                chunk_starts.push_back(target);
+            }
+        }
+    }
+    chunk_starts.push_back(mf.size); // sentinel
+    int actual_chunks = static_cast<int>(chunk_starts.size()) - 1;
+
+    for (int c = 0; c < actual_chunks; c++) {
+        size_t start = chunk_starts[c];
+        size_t end   = chunk_starts[c + 1];
+
+        // Parse all records in this chunk (reuse existing parse_batch)
+        std::vector<FastaRecord> records;
+        size_t pos = start;
+        parse_batch(mf.data, end, pos, records, UINT32_MAX);
+
+        u32 num_records = static_cast<u32>(records.size());
+        if (num_records == 0) continue;
+
+        // Encode all records as protein
+        std::vector<ProteinEncodedRecord> encoded(num_records);
+        for (u32 i = 0; i < num_records; i++) {
+            encoded[i] = encode_protein_one(records[i]);
+        }
+        records.clear();
+        records.shrink_to_fit();
+
+        // Detect whether case stream is needed
+        bool has_any_case = false;
+        for (u32 i = 0; i < num_records; i++) {
+            if (encoded[i].meta.case_mode != CASE_NONE) {
+                has_any_case = true;
+                break;
+            }
+        }
+
+        u8 stream_flags = 0;
+        if (!has_any_case) {
+            stream_flags |= SFLAG_NO_CASE;
+            fprintf(stderr, "    [opt] No case variation detected — omitting case stream\n");
+        }
+
+        // Build ProteinPackedHeader with totals
+        ProteinPackedHeader hdr{};
+        memcpy(hdr.magic, NXFP_MAGIC, 4);
+        hdr.version     = NXFP_VERSION;
+        hdr.num_records = num_records;
+        hdr.newline_style   = newline_style;
+        hdr.stream_flags    = stream_flags;
+        hdr.has_trailing_nl = (c == actual_chunks - 1) ? has_trailing_nl : 1;
+
+        for (u32 i = 0; i < num_records; i++) {
+            const auto& m = encoded[i].meta;
+            hdr.total_hdr  += m.hdr_len;
+            hdr.total_seq  += m.seq_len;
+            hdr.total_case += m.case_bytes;
+            hdr.total_wrap += m.wrap_bytes;
+        }
+
+        // Write chunk file
+        char chunk_name[512];
+        snprintf(chunk_name, sizeof(chunk_name), "%s/chunk_%06d.bin", output_dir, c);
+        FILE* out = fopen(chunk_name, "wb");
+        if (!out) { fprintf(stderr, "Cannot create %s\n", chunk_name); return 1; }
+
+        // Header (32 bytes)
+        fwrite(&hdr, sizeof(ProteinPackedHeader), 1, out);
+
+        // Metadata array (num_records × 20 bytes)
+        for (u32 i = 0; i < num_records; i++) {
+            fwrite(&encoded[i].meta, sizeof(ProteinRecordMeta), 1, out);
+        }
+
+        // Payload buffers
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].header_buf.data(), encoded[i].header_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].seq_buf.data(), encoded[i].seq_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].case_buf.data(), encoded[i].case_buf.size());
+        for (u32 i = 0; i < num_records; i++)
+            write_bytes(out, encoded[i].wrapping_buf.data(), encoded[i].wrapping_buf.size());
+
+        fclose(out);
+        fprintf(stderr, "  chunk %d: %u records, packed size %zu bytes\n",
+                c, num_records,
+                sizeof(ProteinPackedHeader) + num_records * sizeof(ProteinRecordMeta)
+                + hdr.total_hdr + hdr.total_seq + hdr.total_case + hdr.total_wrap);
+    }
+
+    fprintf(stderr, "Encoded protein FASTA into %d chunk(s), newline=%s, trailing_nl=%d\n",
+            actual_chunks, newline_style == NL_CRLF ? "CRLF" : "LF", has_trailing_nl);
+    return 0;
+}
+
+// ============================================================================
+// DECODE-PROTEIN-PACKED — reconstruct protein FASTA from NXFP chunks
+// ============================================================================
+
+static int do_decode_protein_packed(const char* input_arg, const char* output_path) {
+    // Find chunk files: input_arg can be a directory or a single file
+    std::vector<std::string> chunk_files;
+
+    struct stat st;
+    if (stat(input_arg, &st) != 0) {
+        fprintf(stderr, "Cannot access %s\n", input_arg);
+        return 1;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR* d = opendir(input_arg);
+        if (!d) { fprintf(stderr, "Cannot open directory %s\n", input_arg); return 1; }
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.size() > 4 &&
+                name.compare(0, 6, "chunk_") == 0 &&
+                name.compare(name.size() - 4, 4, ".bin") == 0) {
+                chunk_files.push_back(std::string(input_arg) + "/" + name);
+            }
+        }
+        closedir(d);
+        std::sort(chunk_files.begin(), chunk_files.end());
+    } else {
+        chunk_files.push_back(input_arg);
+    }
+
+    if (chunk_files.empty()) {
+        fprintf(stderr, "No chunk files found in %s\n", input_arg);
+        return 1;
+    }
+
+    FILE* out = fopen(output_path, "wb");
+    if (!out) { fprintf(stderr, "Cannot create %s\n", output_path); return 1; }
+
+    u32 total_decoded = 0;
+
+    for (size_t ci = 0; ci < chunk_files.size(); ci++) {
+        auto file_data = read_file_bytes(chunk_files[ci]);
+
+        if (file_data.size() < sizeof(ProteinPackedHeader)) {
+            fprintf(stderr, "Chunk %s too small (%zu bytes)\n",
+                    chunk_files[ci].c_str(), file_data.size());
+            fclose(out);
+            return 1;
+        }
+
+        ProteinPackedHeader hdr;
+        memcpy(&hdr, file_data.data(), sizeof(ProteinPackedHeader));
+
+        if (memcmp(hdr.magic, NXFP_MAGIC, 4) != 0) {
+            fprintf(stderr, "Bad magic in %s\n", chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+        if (hdr.version != NXFP_VERSION) {
+            fprintf(stderr, "Unsupported version %u in %s\n",
+                    hdr.version, chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+
+        u32 num_records = hdr.num_records;
+        const char* nl = (hdr.newline_style == NL_CRLF) ? "\r\n" : "\n";
+        size_t nl_len = (hdr.newline_style == NL_CRLF) ? 2 : 1;
+
+        // Read metadata array
+        size_t meta_offset = sizeof(ProteinPackedHeader);
+        size_t meta_size = num_records * sizeof(ProteinRecordMeta);
+        if (file_data.size() < meta_offset + meta_size) {
+            fprintf(stderr, "Truncated metadata in %s\n", chunk_files[ci].c_str());
+            fclose(out);
+            return 1;
+        }
+
+        std::vector<ProteinRecordMeta> metas(num_records);
+        memcpy(metas.data(), file_data.data() + meta_offset, meta_size);
+
+        // Payload buffers start right after metadata
+        const u8* payload = file_data.data() + meta_offset + meta_size;
+
+        // Layout: [hdr_data][seq_data][case_data][wrap_data]
+        size_t off_hdr  = 0;
+        size_t off_seq  = hdr.total_hdr;
+        size_t off_cs   = off_seq + hdr.total_seq;
+        size_t off_wr   = off_cs + hdr.total_case;
+
+        // Per-record cursors
+        size_t cur_hdr = 0, cur_seq = 0, cur_cs = 0, cur_wr = 0;
+
+        for (u32 r = 0; r < num_records; r++) {
+            const ProteinRecordMeta& rm = metas[r];
+
+            // Write header
+            fwrite(">", 1, 1, out);
+            fwrite(payload + off_hdr + cur_hdr, 1, rm.hdr_len, out);
+            fwrite(nl, 1, nl_len, out);
+            cur_hdr += rm.hdr_len;
+
+            u32 L = rm.seq_len;
+
+            // Read raw uppercase sequence bytes
+            std::vector<char> raw_seq(L);
+            memcpy(raw_seq.data(), payload + off_seq + cur_seq, L);
+            cur_seq += L;
+
+            // Apply case
+            if (rm.case_mode == CASE_MASK) {
+                auto case_bits = unpack_bits(payload + off_cs + cur_cs, L);
+                for (u32 i = 0; i < L; i++) {
+                    if (case_bits[i] && raw_seq[i] >= 'A' && raw_seq[i] <= 'Z') {
+                        raw_seq[i] = raw_seq[i] + ('a' - 'A');
+                    }
+                }
+            } else if (rm.case_mode == CASE_SPARSE) {
+                const u8* cs_ptr = payload + off_cs + cur_cs;
+                const u8* cs_end = cs_ptr + rm.case_bytes;
+                u64 count = decode_varint(cs_ptr, cs_end);
+                u32 pos = 0;
+                for (u64 k = 0; k < count && cs_ptr < cs_end; k++) {
+                    u64 delta = decode_varint(cs_ptr, cs_end);
+                    pos += static_cast<u32>(delta);
+                    if (pos < L && raw_seq[pos] >= 'A' && raw_seq[pos] <= 'Z') {
+                        raw_seq[pos] = raw_seq[pos] + ('a' - 'A');
+                    }
+                }
+            }
+            cur_cs += rm.case_bytes;
+
+            // Decode wrapping
+            auto line_lengths = decode_wrapping(
+                payload + off_wr + cur_wr, rm.wrap_bytes, L);
+            cur_wr += rm.wrap_bytes;
+
+            // Write sequence lines
+            u32 seq_pos = 0;
+            for (size_t k = 0; k < line_lengths.size(); k++) {
+                u32 ll = line_lengths[k];
+                fwrite(raw_seq.data() + seq_pos, 1, ll, out);
+                seq_pos += ll;
+
+                bool is_last = (r == num_records - 1) && (k == line_lengths.size() - 1);
+                if (is_last && !hdr.has_trailing_nl) {
+                    // Omit trailing newline
+                } else {
+                    fwrite(nl, 1, nl_len, out);
+                }
+            }
+        }
+
+        total_decoded += num_records;
+        fprintf(stderr, "  chunk %zu: decoded %u protein records\n", ci, num_records);
+    }
+
+    fclose(out);
+    fprintf(stderr, "Decoded %u protein records total from %zu chunk(s)\n",
+            total_decoded, chunk_files.size());
+    return 0;
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
 static void usage() {
     fprintf(stderr,
         "Usage:\n"
-        "  fasta_codec encode    <input.fasta> <output_dir> [num_threads]\n"
-        "  fasta_codec decode    <streams_dir> <output.fasta>\n"
-        "  fasta_codec validate  <streams_dir>\n");
+        "  fasta_codec encode                 <input.fasta> <output_dir> [num_threads]\n"
+        "  fasta_codec decode                 <streams_dir> <output.fasta>\n"
+        "  fasta_codec validate               <streams_dir>\n"
+        "  fasta_codec encode-packed          <input.fasta> <output_dir> [num_chunks]\n"
+        "  fasta_codec decode-packed          <packed_dir>  <output.fasta>\n"
+        "  fasta_codec encode-protein-packed  <input.fasta> <output_dir> [num_chunks]\n"
+        "  fasta_codec decode-protein-packed  <packed_dir>  <output.fasta>\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -591,6 +1355,34 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return do_validate(argv[2]);
+    } else if (cmd == "encode-packed") {
+        if (argc < 4 || argc > 5) {
+            fprintf(stderr, "encode-packed: <input.fasta> <output_dir> [num_chunks]\n");
+            return 1;
+        }
+        int chunks = 1;
+        if (argc == 5) chunks = std::max(1, atoi(argv[4]));
+        return do_encode_packed(argv[2], argv[3], chunks);
+    } else if (cmd == "decode-packed") {
+        if (argc != 4) {
+            fprintf(stderr, "decode-packed: <packed_dir> <output.fasta>\n");
+            return 1;
+        }
+        return do_decode_packed(argv[2], argv[3]);
+    } else if (cmd == "encode-protein-packed") {
+        if (argc < 4 || argc > 5) {
+            fprintf(stderr, "encode-protein-packed: <input.fasta> <output_dir> [num_chunks]\n");
+            return 1;
+        }
+        int chunks = 1;
+        if (argc == 5) chunks = std::max(1, atoi(argv[4]));
+        return do_encode_protein_packed(argv[2], argv[3], chunks);
+    } else if (cmd == "decode-protein-packed") {
+        if (argc != 4) {
+            fprintf(stderr, "decode-protein-packed: <packed_dir> <output.fasta>\n");
+            return 1;
+        }
+        return do_decode_protein_packed(argv[2], argv[3]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", cmd.c_str());
         usage();

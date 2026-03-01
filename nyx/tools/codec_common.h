@@ -354,15 +354,29 @@ static inline std::vector<char> decode_sequence(
     const u8* exceptions_data, u32 exceptions_bytes,
     const u8* case_data, u32 case_bytes, u8 case_mode)
 {
-    // N-mask
-    auto nmask = unpack_bits(nmask_data, L);
-    u32 Lp = 0;
-    for (u32 i = 0; i < L; i++) { if (!nmask[i]) Lp++; }
+    // N-mask: if nmask_bytes==0 with L>0, stream was omitted (no N's)
+    std::vector<bool> nmask;
+    u32 Lp;
+    if (nmask_bytes > 0) {
+        nmask = unpack_bits(nmask_data, L);
+        Lp = 0;
+        for (u32 i = 0; i < L; i++) { if (!nmask[i]) Lp++; }
+    } else {
+        nmask.assign(L, false);
+        Lp = L;
+    }
 
-    // ACGT-mask
-    auto acgtmask = unpack_bits(acgtmask_data, Lp);
-    u32 count_acgt = 0;
-    for (u32 j = 0; j < Lp; j++) { if (acgtmask[j]) count_acgt++; }
+    // ACGT-mask: if acgtmask_bytes==0 with Lp>0, stream was omitted (all ACGT)
+    std::vector<bool> acgtmask;
+    u32 count_acgt;
+    if (acgtmask_bytes > 0) {
+        acgtmask = unpack_bits(acgtmask_data, Lp);
+        count_acgt = 0;
+        for (u32 j = 0; j < Lp; j++) { if (acgtmask[j]) count_acgt++; }
+    } else {
+        acgtmask.assign(Lp, true);
+        count_acgt = Lp;
+    }
 
     // 2-bit bases
     auto base_values = unpack_2bit(bases2_data, count_acgt);

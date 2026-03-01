@@ -30,6 +30,11 @@ FIXTURE_NAMES = [
     "scattered_ns.fasta",
 ]
 
+PROTEIN_FIXTURE_NAMES = [
+    "protein_basic.fasta",
+    "protein_extended.fasta",
+]
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -523,6 +528,94 @@ class TestStreamInvariants:
 
 
 # =============================================================================
+# Tier 2b: Packed codec roundtrip (encode-packed / decode-packed)
+# =============================================================================
+
+
+@requires_fasta_codec
+class TestPackedCodecRoundTrip:
+    """Test that fasta_codec encode-packed → decode-packed produces byte-identical output."""
+
+    @pytest.fixture(params=FIXTURE_NAMES)
+    def fasta_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip_single_chunk(self, fasta_fixture, tmp_path):
+        from nyx.core.codec import encode_packed, decode_packed
+
+        chunks_dir = tmp_path / "chunks"
+        output = tmp_path / "reconstructed.fasta"
+
+        chunks = encode_packed(fasta_fixture, chunks_dir, num_chunks=1)
+        assert len(chunks) == 1
+        assert chunks[0].name == "chunk_000000.bin"
+
+        decode_packed(chunks_dir, output)
+
+        assert _sha256(fasta_fixture) == _sha256(output), (
+            f"Packed roundtrip (1 chunk) failed for {fasta_fixture.name}"
+        )
+
+    def test_roundtrip_multi_chunk(self, fasta_fixture, tmp_path):
+        from nyx.core.codec import encode_packed, decode_packed
+
+        chunks_dir = tmp_path / "chunks"
+        output = tmp_path / "reconstructed.fasta"
+
+        # Request 3 chunks (small fixtures may still produce fewer)
+        chunks = encode_packed(fasta_fixture, chunks_dir, num_chunks=3)
+        assert len(chunks) >= 1
+
+        decode_packed(chunks_dir, output)
+
+        assert _sha256(fasta_fixture) == _sha256(output), (
+            f"Packed roundtrip (multi-chunk) failed for {fasta_fixture.name}"
+        )
+
+    def test_packed_binary_structure(self, fasta_fixture, tmp_path):
+        """Validate NXF2 binary header structure."""
+        from nyx.core.codec import encode_packed
+
+        chunks_dir = tmp_path / "chunks"
+        chunks = encode_packed(fasta_fixture, chunks_dir, num_chunks=1)
+
+        data = chunks[0].read_bytes()
+        assert len(data) >= 48, "NXF2 binary too small for header"
+
+        # Validate magic and version
+        assert data[:4] == b"NXF2", f"Bad magic: {data[:4]}"
+        version = struct.unpack_from("<I", data, 4)[0]
+        assert version == 2, f"Bad version: {version}"
+
+        # Parse header
+        num_records = struct.unpack_from("<I", data, 8)[0]
+        assert num_records > 0
+
+        newline_style = data[12]
+        assert newline_style in (0, 1)
+
+        has_trailing = data[13]
+        assert has_trailing in (0, 1)
+
+        # Parse totals
+        total_hdr = struct.unpack_from("<I", data, 16)[0]
+        total_nmask = struct.unpack_from("<I", data, 20)[0]
+        total_acgt = struct.unpack_from("<I", data, 24)[0]
+        total_bases = struct.unpack_from("<I", data, 28)[0]
+        total_exc = struct.unpack_from("<I", data, 32)[0]
+        total_case = struct.unpack_from("<I", data, 36)[0]
+        total_wrap = struct.unpack_from("<I", data, 40)[0]
+
+        # Verify file size matches header + metadata + payloads
+        expected_size = (48 + num_records * 36 +
+                         total_hdr + total_nmask + total_acgt +
+                         total_bases + total_exc + total_case + total_wrap)
+        assert len(data) == expected_size, (
+            f"File size {len(data)} != expected {expected_size}"
+        )
+
+
+# =============================================================================
 # Tier 3: .zlfasta container roundtrip
 # =============================================================================
 
@@ -671,3 +764,252 @@ class TestFullPipeline:
             catch_exceptions=False,
         )
         assert result.exit_code == 0
+
+
+# =============================================================================
+# Tier 5: Protein FASTA codec roundtrip
+# =============================================================================
+
+
+@requires_fasta_codec
+class TestProteinCodecRoundTrip:
+    """Test that fasta_codec encode-protein-packed → decode-protein-packed
+    produces byte-identical output for protein FASTA files."""
+
+    @pytest.fixture(params=PROTEIN_FIXTURE_NAMES)
+    def protein_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip_single_chunk(self, protein_fixture, tmp_path):
+        from nyx.core.codec import encode_protein_packed, decode_protein_packed
+
+        chunks_dir = tmp_path / "chunks"
+        output = tmp_path / "reconstructed.fasta"
+
+        chunks = encode_protein_packed(protein_fixture, chunks_dir, num_chunks=1)
+        assert len(chunks) == 1
+        assert chunks[0].name == "chunk_000000.bin"
+
+        decode_protein_packed(chunks_dir, output)
+
+        assert _sha256(protein_fixture) == _sha256(output), (
+            f"Protein roundtrip (1 chunk) failed for {protein_fixture.name}"
+        )
+
+    def test_roundtrip_multi_chunk(self, protein_fixture, tmp_path):
+        from nyx.core.codec import encode_protein_packed, decode_protein_packed
+
+        chunks_dir = tmp_path / "chunks"
+        output = tmp_path / "reconstructed.fasta"
+
+        chunks = encode_protein_packed(protein_fixture, chunks_dir, num_chunks=3)
+        assert len(chunks) >= 1
+
+        decode_protein_packed(chunks_dir, output)
+
+        assert _sha256(protein_fixture) == _sha256(output), (
+            f"Protein roundtrip (multi-chunk) failed for {protein_fixture.name}"
+        )
+
+    def test_protein_binary_structure(self, protein_fixture, tmp_path):
+        """Validate NXFP binary header structure."""
+        from nyx.core.codec import encode_protein_packed
+
+        chunks_dir = tmp_path / "chunks"
+        chunks = encode_protein_packed(protein_fixture, chunks_dir, num_chunks=1)
+
+        data = chunks[0].read_bytes()
+        assert len(data) >= 32, "NXFP binary too small for header"
+
+        # Validate magic and version
+        assert data[:4] == b"NXFP", f"Bad magic: {data[:4]}"
+        version = struct.unpack_from("<I", data, 4)[0]
+        assert version == 1, f"Bad version: {version}"
+
+        # Parse header
+        num_records = struct.unpack_from("<I", data, 8)[0]
+        assert num_records > 0
+
+        newline_style = data[12]
+        assert newline_style in (0, 1)
+
+        has_trailing = data[13]
+        assert has_trailing in (0, 1)
+
+        # Parse totals
+        total_hdr = struct.unpack_from("<I", data, 16)[0]
+        total_seq = struct.unpack_from("<I", data, 20)[0]
+        total_case = struct.unpack_from("<I", data, 24)[0]
+        total_wrap = struct.unpack_from("<I", data, 28)[0]
+
+        # Verify file size matches header + metadata + payloads
+        expected_size = (32 + num_records * 20 +
+                         total_hdr + total_seq + total_case + total_wrap)
+        assert len(data) == expected_size, (
+            f"File size {len(data)} != expected {expected_size}"
+        )
+
+
+# =============================================================================
+# Tier 5b: Protein FASTA edge cases
+# =============================================================================
+
+
+@requires_fasta_codec
+class TestProteinEdgeCases:
+    """Test edge cases for the protein codec."""
+
+    def _roundtrip(self, content: bytes, tmp_path: Path) -> bool:
+        from nyx.core.codec import encode_protein_packed, decode_protein_packed
+
+        input_file = tmp_path / "input.fasta"
+        input_file.write_bytes(content)
+
+        chunks_dir = tmp_path / "chunks"
+        output = tmp_path / "output.fasta"
+
+        encode_protein_packed(input_file, chunks_dir, num_chunks=1)
+        decode_protein_packed(chunks_dir, output)
+
+        return _sha256(input_file) == _sha256(output)
+
+    def test_single_aa(self, tmp_path):
+        content = b">single\nF\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_all_lowercase_protein(self, tmp_path):
+        content = b">lower\nmvhltpeeksavtalwgkvnvdevgg\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_all_uppercase_protein(self, tmp_path):
+        content = b">upper\nMVHLTPEEKSAVTALWGKVNVDEVGG\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_protein_with_stops(self, tmp_path):
+        content = b">stops\nMVHLT*PEEK*SAVT*\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_protein_with_gaps(self, tmp_path):
+        content = b">gaps\nMVHLT--PEEK..SAVT\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_protein_with_x(self, tmp_path):
+        content = b">unknown\nMVXXXHLTPEEK\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_empty_protein_sequence(self, tmp_path):
+        content = b">empty\n>next\nMVHLT\n"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_protein_no_trailing_newline(self, tmp_path):
+        content = b">seq\nMVHLTPEEK"
+        assert self._roundtrip(content, tmp_path)
+
+    def test_protein_multi_record(self, tmp_path):
+        records = b""
+        for i in range(50):
+            records += f">protein_{i}\n".encode()
+            records += b"MVHLTPEEKSAVTALWGKVNVDEVGG\n"
+        assert self._roundtrip(records, tmp_path)
+
+
+# =============================================================================
+# Tier 6: Auto-detection of protein vs nucleotide
+# =============================================================================
+
+
+class TestFastaSubtypeDetection:
+    """Test auto-detection of nucleotide vs protein FASTA."""
+
+    def test_nucleotide_detected(self):
+        from nyx.core.detect import detect_fasta_subtype
+        for name in FIXTURE_NAMES:
+            fixture = FIXTURES_DIR / name
+            assert detect_fasta_subtype(fixture) == "nucleotide", (
+                f"Expected nucleotide for {name}"
+            )
+
+    def test_protein_detected(self):
+        from nyx.core.detect import detect_fasta_subtype
+        for name in PROTEIN_FIXTURE_NAMES:
+            fixture = FIXTURES_DIR / name
+            assert detect_fasta_subtype(fixture) == "protein", (
+                f"Expected protein for {name}"
+            )
+
+
+# =============================================================================
+# Tier 7: Full protein pipeline (requires zli)
+# =============================================================================
+
+
+@requires_fasta_codec
+@requires_zli
+class TestProteinFullPipeline:
+    """Test the full protein compress-lossless → decompress-lossless pipeline."""
+
+    @pytest.fixture(params=PROTEIN_FIXTURE_NAMES)
+    def protein_fixture(self, request):
+        return FIXTURES_DIR / request.param
+
+    def test_roundtrip_explicit_type(self, protein_fixture, tmp_path):
+        from click.testing import CliRunner
+        from nyx.cli import main
+
+        runner = CliRunner()
+        compressed = tmp_path / "compressed.zlfasta"
+        decompressed = tmp_path / "decompressed.fasta"
+
+        # Compress with --type protein
+        result = runner.invoke(
+            main,
+            ["compress-lossless", str(protein_fixture), "-o", str(compressed),
+             "--type", "protein"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Compress failed:\n{result.output}"
+        assert compressed.exists()
+
+        # Decompress
+        result = runner.invoke(
+            main,
+            ["decompress-lossless", str(compressed), "-o", str(decompressed), "-f"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
+        assert decompressed.exists()
+
+        # Verify byte-identical
+        assert _sha256(protein_fixture) == _sha256(decompressed), (
+            f"Protein pipeline roundtrip failed for {protein_fixture.name}"
+        )
+
+    def test_roundtrip_auto_detect(self, protein_fixture, tmp_path):
+        from click.testing import CliRunner
+        from nyx.cli import main
+
+        runner = CliRunner()
+        compressed = tmp_path / "compressed.zlfasta"
+        decompressed = tmp_path / "decompressed.fasta"
+
+        # Compress with auto-detect (should detect protein)
+        result = runner.invoke(
+            main,
+            ["compress-lossless", str(protein_fixture), "-o", str(compressed)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Compress failed:\n{result.output}"
+        assert "PROTEIN FASTA" in result.output
+
+        # Decompress
+        result = runner.invoke(
+            main,
+            ["decompress-lossless", str(compressed), "-o", str(decompressed), "-f"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"Decompress failed:\n{result.output}"
+
+        # Verify byte-identical
+        assert _sha256(protein_fixture) == _sha256(decompressed), (
+            f"Protein auto-detect pipeline roundtrip failed for {protein_fixture.name}"
+        )
