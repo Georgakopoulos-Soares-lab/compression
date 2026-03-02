@@ -15,6 +15,7 @@
 /tools/fastq_preprocess
 /tools/vcf_preprocessing
 /tools/vcf_postprocess
+/tools/vcf_preprocessor
 /tools/geojson_to_bin_universal
 /tools/lidar_preprocessor
 

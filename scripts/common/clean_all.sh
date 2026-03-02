@@ -17,6 +17,7 @@ TARGETS+=(
   "$HERE/tools/biocompress_preprocessor"
   "$HERE/tools/geojson_to_bin_universal"
   "$HERE/tools/lidar_preprocessor"
+  "$HERE/tools/vcf_preprocessor"
 )
 
 for t in "${TARGETS[@]}"; do

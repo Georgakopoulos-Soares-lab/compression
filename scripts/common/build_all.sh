@@ -33,8 +33,14 @@ g++ -O3 -std=c++17 \
   -o "$HERE/tools/lidar_preprocessor" \
   "$HERE/tools/lidar_preprocessor.cpp"
 
+# ---- 6) Build VCF preprocessor ----
+g++ -O3 -std=c++17 \
+  -o "$HERE/tools/vcf_preprocessor" \
+  "$HERE/tools/vcf_preprocessor.cpp"
+
 echo "Build OK:"
 echo "  $HERE/openzl/zli"
 echo "  $HERE/tools/biocompress_preprocessor"
 echo "  $HERE/tools/geojson_to_bin_universal"
 echo "  $HERE/tools/lidar_preprocessor"
+echo "  $HERE/tools/vcf_preprocessor"

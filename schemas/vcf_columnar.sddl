@@ -1,0 +1,47 @@
+U32 = UInt32LE
+F32 = Float32LE
+
+# VCF Columnar Schema v1
+# Magic "VCF1"
+#
+# Stores all fixed-column fields from a chunk of VCF records in a columnar
+# binary layout optimised for OpenZL's schema-driven compression.
+#
+# Chromosome is encoded as a uint8 index:
+#   0..21  -> chr1..chr22
+#   22     -> chrX
+#   23     -> chrY
+#   24     -> chrM / chrMT
+#   25     -> any other contig
+#
+# filter_pass encoding:
+#   0 -> PASS
+#   1 -> filtered (one or more filter tags present)
+#   2 -> '.' (missing)
+#
+# qual_present encoding:
+#   0 -> QUAL field was '.' (quals entry is 0.0)
+#   1 -> QUAL field is a finite float
+
+magic        : Byte[4]
+num_variants : U32
+ref_total    : U32
+alt_total    : U32
+info_total   : U32
+
+# --- Per-variant integer columns (highly compressible) ---
+chrom_ids    : Byte[num_variants]
+positions    : U32[num_variants]
+qual_present : Byte[num_variants]
+quals        : F32[num_variants]
+filter_pass  : Byte[num_variants]
+ref_lens     : U32[num_variants]
+alt_lens     : U32[num_variants]
+info_lens    : U32[num_variants]
+
+# --- Variable-length payload columns ---
+ref_payload  : Byte[ref_total]
+alt_payload  : Byte[alt_total]
+info_payload : Byte[info_total]
+
+: Byte[_rem]
