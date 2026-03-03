@@ -53,12 +53,14 @@ _JSONL_SIDECAR_FILES = {"meta.json"}
 # Container magic bytes
 ZLFASTA_MAGIC = b"ZLFASTA\x00"
 ZLFASTQ_MAGIC = b"ZLFASTQ\x00"
+ZLVCF_MAGIC = b"ZLVCF\x00\x00\x00"
 ZLJSONL_MAGIC = b"ZLJSONL\x00"
 ZLVCF_MAGIC = b"ZLVCF\x00\x00\x00"
 
 # Default model directories
 DEFAULT_FASTA_MODELS_DIR = _NYX_ROOT / "models" / "lossless"
 DEFAULT_CSV_MODELS_DIR = _NYX_ROOT / "models" / "lossless_fastq_csv"
+DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 DEFAULT_JSONL_MODELS_DIR = _NYX_ROOT / "models" / "lossless_jsonl"
 DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 
@@ -66,14 +68,20 @@ DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 _NUCLEOTIDE_FASTA_COMPRESSOR = "nucleotide_fasta.zl_compressor"
 _PROTEIN_FASTA_COMPRESSOR = "protein_fasta.zl_compressor"
 _CSV_COMPRESSOR = "fastq_csv.zl_compressor"
+_VCF_COMPRESSOR = "vcf_csv.zl_compressor"
 _JSONL_COMPRESSOR = "jsonl_csv.zl_compressor"
 _VCF_COMPRESSOR = "vcf_csv.zl_compressor"
 
 # File extensions for group training
 _FASTA_EXTENSIONS = {".fasta", ".fa", ".fna", ".fas", ".fsa"}
 _FASTQ_EXTENSIONS = {".fastq", ".fq"}
+_VCF_EXTENSIONS = {".vcf"}
 _JSONL_EXTENSIONS = {".jsonl"}
 _VCF_EXTENSIONS = {".vcf"}
+
+# VCF body part regex
+_VCF_PART_PATTERN = re.compile(r"^part_\d{3}\.tsv$")
+_VCF_SIDECAR_FILES = {"header.vcf", "meta.json"}
 
 # VCF body part regex
 _VCF_PART_PATTERN = re.compile(r"^part_\d{3}\.tsv$")
@@ -135,6 +143,8 @@ def detect_container(filepath: Path) -> str:
         return "fasta"
     if magic == ZLFASTQ_MAGIC:
         return "fastq"
+    if magic == ZLVCF_MAGIC:
+        return "vcf"
     if magic == ZLJSONL_MAGIC:
         return "jsonl"
     raise click.ClickException(
