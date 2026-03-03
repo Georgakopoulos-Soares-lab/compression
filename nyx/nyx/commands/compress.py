@@ -18,16 +18,18 @@ from ..core.config import (
     DEFAULT_PROFILE,
     SCHEMA_REGISTRY,
 )
-from ..core.detect import detect_filetype, detect_fasta_subtype, is_genomic
+from ..core.detect import detect_filetype, detect_fasta_subtype, is_genomic, is_structured
 from ..utils.paths import find_schema
 from ._lossless import (
     compress_fasta_packed,
     compress_protein_packed,
     compress_csv_fastq,
     compress_vcf,
+    compress_jsonl,
     DEFAULT_FASTA_MODELS_DIR,
     DEFAULT_CSV_MODELS_DIR,
     DEFAULT_VCF_MODELS_DIR,
+    DEFAULT_JSONL_MODELS_DIR,
 )
 
 
@@ -36,7 +38,7 @@ from ._lossless import (
 @click.option("-o", "--output", "output_file", type=click.Path(),
               default=None, help="Output file path (auto-determined by pipeline).")
 @click.option("-t", "--type", "filetype",
-              type=click.Choice(["auto", "fasta", "protein", "fastq", "vcf", "generic"]),
+              type=click.Choice(["auto", "fasta", "protein", "fastq", "vcf", "jsonl", "generic"]),
               default="auto",
               help="File type (default: auto-detect). Use 'protein' for protein FASTA.")
 @click.option("--mode",
@@ -86,6 +88,7 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
     Auto-routing (--mode auto, the default):
       FASTA file  → lossless packed (auto-detects nucleotide/protein) → .zlfasta
       FASTQ file  → lossless CSV decomposition                       → .zlfastq
+      JSONL file  → lossless type-grouped TSV decomposition           → .zljsonl
       Other       → generic OpenZL compression                       → .nyx
 
     \b
@@ -144,6 +147,9 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
       nyx compress genome.fasta --mode schema    # schema-aware → .nyx
       nyx compress genome.fasta --benchmark      # compress + benchmark competitors
       nyx compress reads.fastq --train --group-train /path/to/samples/
+      nyx compress telemetry.jsonl                   # lossless JSONL → .zljsonl
+      nyx compress telemetry.jsonl --train           # train + lossless compress
+      nyx compress telemetry.jsonl --train --group-train /path/to/jsonl/
     """
     input_path = Path(input_file).resolve()
     train_threads = train_threads or (os.cpu_count() or 4)
@@ -167,9 +173,11 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
     if sddl and mode == "auto":
         mode = "schema"
 
+    structured = is_structured(detected)
+
     # --- Auto-select mode ---
     if mode == "auto":
-        if detected in ("fasta", "fastq", "vcf"):
+        if detected in ("fasta", "fastq", "vcf", "jsonl"):
             mode = "lossless"
         elif genomic:
             cfg = SCHEMA_REGISTRY.get(detected)
@@ -181,9 +189,9 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
             mode = "generic"
 
     # --- Validate mode + options ---
-    if mode == "lossless" and detected not in ("fasta", "fastq", "vcf"):
+    if mode == "lossless" and detected not in ("fasta", "fastq", "vcf", "jsonl"):
         raise click.UsageError(
-            f"Lossless mode requires FASTA, FASTQ, or VCF input, "
+            f"Lossless mode requires FASTA, FASTQ, VCF, or JSONL input, "
             f"but detected: {detected or 'unknown'}. "
             f"Use --type to override or --mode generic."
         )
@@ -214,6 +222,8 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
             output_path = input_path.parent / (input_path.name + ".zlfastq")
         elif mode == "lossless" and detected == "vcf":
             output_path = input_path.parent / (input_path.name + ".zlvcf")
+        elif mode == "lossless" and detected == "jsonl":
+            output_path = input_path.parent / (input_path.name + ".zljsonl")
         else:
             output_path = input_path.parent / (input_path.name + ".nyx")
     else:
@@ -393,6 +403,22 @@ def _run_lossless(input_path, output_path, detected, filetype, do_train,
             input_path=input_path,
             output_path=output_path,
             models_dir=vcf_models,
+            do_train=do_train,
+            no_trained=no_trained,
+            verbose=verbose,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            train_sample_bytes=train_sample_bytes,
+            compress_jobs=compress_jobs,
+            group_train_dir=group_train,
+        )
+    elif detected == "jsonl":
+        click.echo(f"Compressing {input_path.name} (lossless JSONL)")
+        jsonl_models = Path(models_dir) if models_dir else DEFAULT_JSONL_MODELS_DIR
+        compress_jsonl(
+            input_path=input_path,
+            output_path=output_path,
+            models_dir=jsonl_models,
             do_train=do_train,
             no_trained=no_trained,
             verbose=verbose,

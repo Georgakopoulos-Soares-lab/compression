@@ -1,4 +1,4 @@
-"""Internal lossless compression/decompression pipelines for FASTA, FASTQ, and VCF.
+"""Internal lossless compression/decompression pipelines for FASTA, FASTQ, VCF, and JSONL.
 
 This module consolidates all lossless pipeline functions. It is imported by
 the unified compress.py and decompress.py commands — it has no Click commands
@@ -15,9 +15,10 @@ from pathlib import Path
 
 import click
 
-from ..core import codec, fastq_codec, openzl, vcf_codec
+from ..core import codec, fastq_codec, jsonl_codec, openzl, vcf_codec
 from ..core.zlfasta import create_zlfasta, extract_zlfasta
 from ..core.zlfastq import create_zlfastq, extract_zlfastq
+from ..core.zljsonl import create_zljsonl, extract_zljsonl
 from ..core.zlvcf import create_zlvcf, extract_zlvcf
 from ..utils.paths import find_schema
 
@@ -46,26 +47,32 @@ _CHUNK_PATTERN = re.compile(r"^(.+\.bin)\.(\d{3})$")
 _PACKED_CHUNK_PATTERN = re.compile(r"^chunk_\d{6}\.bin$")
 _CSV_PART_PATTERN = re.compile(r"^part_\d{3}\.tsv$")
 _CSV_SIDECAR_FILES = {"meta.bin", "plus.bin", "wrap.bin"}
+_JSONL_TSV_PATTERN = re.compile(r"^.+\.tsv$")
+_JSONL_SIDECAR_FILES = {"meta.json"}
 
 # Container magic bytes
 ZLFASTA_MAGIC = b"ZLFASTA\x00"
 ZLFASTQ_MAGIC = b"ZLFASTQ\x00"
+ZLJSONL_MAGIC = b"ZLJSONL\x00"
 ZLVCF_MAGIC = b"ZLVCF\x00\x00\x00"
 
 # Default model directories
 DEFAULT_FASTA_MODELS_DIR = _NYX_ROOT / "models" / "lossless"
 DEFAULT_CSV_MODELS_DIR = _NYX_ROOT / "models" / "lossless_fastq_csv"
+DEFAULT_JSONL_MODELS_DIR = _NYX_ROOT / "models" / "lossless_jsonl"
 DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 
 # Compressor filenames
 _NUCLEOTIDE_FASTA_COMPRESSOR = "nucleotide_fasta.zl_compressor"
 _PROTEIN_FASTA_COMPRESSOR = "protein_fasta.zl_compressor"
 _CSV_COMPRESSOR = "fastq_csv.zl_compressor"
+_JSONL_COMPRESSOR = "jsonl_csv.zl_compressor"
 _VCF_COMPRESSOR = "vcf_csv.zl_compressor"
 
 # File extensions for group training
 _FASTA_EXTENSIONS = {".fasta", ".fa", ".fna", ".fas", ".fsa"}
 _FASTQ_EXTENSIONS = {".fastq", ".fq"}
+_JSONL_EXTENSIONS = {".jsonl"}
 _VCF_EXTENSIONS = {".vcf"}
 
 # VCF body part regex
@@ -121,16 +128,18 @@ def _decompress_one(name, extracted_path, decompressed_path, verbose):
 
 
 def detect_container(filepath: Path) -> str:
-    """Detect container type from magic bytes. Returns 'fasta' or 'fastq'."""
+    """Detect container type from magic bytes. Returns 'fasta', 'fastq', 'vcf', or 'jsonl'."""
     with open(filepath, "rb") as f:
         magic = f.read(8)
     if magic == ZLFASTA_MAGIC:
         return "fasta"
     if magic == ZLFASTQ_MAGIC:
         return "fastq"
+    if magic == ZLJSONL_MAGIC:
+        return "jsonl"
     raise click.ClickException(
         f"Unrecognized container format in {filepath.name}. "
-        f"Expected .zlfasta or .zlfastq magic bytes."
+        f"Expected .zlfasta, .zlfastq, .zlvcf, or .zljsonl magic bytes."
     )
 
 
@@ -1522,6 +1531,296 @@ def decompress_lossless_vcf(input_path: Path, output_path: Path,
         # Step 3: Reconstruct VCF from header + body parts
         click.echo("  [3/3] Reconstructing VCF...")
         vcf_codec.decode(decomp_dir, output_path, verbose=verbose)
+
+        elapsed = time.time() - t0
+        output_size = output_path.stat().st_size
+
+        click.echo(
+            f"\nOutput: {output_path.name} ({output_size:,} bytes)\n"
+            f"Time:   {elapsed:.1f}s"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# JSONL Compress: type-grouped TSV decomposition + OpenZL CSV profile
+# ---------------------------------------------------------------------------
+
+def compress_jsonl(
+    input_path: Path,
+    output_path: Path,
+    models_dir: Path,
+    do_train: bool,
+    no_trained: bool,
+    verbose: bool,
+    train_threads: int,
+    max_time_secs: int,
+    train_sample_bytes: int,
+    compress_jobs: int,
+    group_train_dir: str = None,
+):
+    """JSONL compression via type-grouped TSV decomposition + OpenZL CSV profile."""
+    input_size = input_path.stat().st_size
+
+    click.echo(f"Input:  {input_path.name} ({input_size:,} bytes)")
+
+    t0 = time.time()
+    tmpdir = tempfile.mkdtemp(prefix="nyx_jsonl_")
+
+    try:
+        tsv_dir = Path(tmpdir) / "tsv"
+        compressed_dir = Path(tmpdir) / "compressed"
+        compressed_dir.mkdir()
+
+        # Step 1: Encode JSONL into type-grouped TSVs + meta.json
+        step1_label = "[1/4]" if do_train else "[1/3]"
+        click.echo(f"  {step1_label} Encoding JSONL into type-grouped TSVs...")
+        tsv_paths, meta_path = jsonl_codec.encode(
+            input_path, tsv_dir, verbose=verbose)
+
+        total_tsv_size = sum(f.stat().st_size for f in tsv_paths)
+        meta_size = meta_path.stat().st_size
+        click.echo(f"    {len(tsv_paths)} type TSV(s), "
+                   f"{total_tsv_size:,} bytes TSV + {meta_size:,} bytes meta")
+        if verbose:
+            for f in tsv_paths:
+                click.echo(f"    {f.name}: {f.stat().st_size:,} bytes")
+
+        # Step 2: Train or load CSV compressor
+        compressor_path = models_dir / _JSONL_COMPRESSOR
+        if do_train:
+            models_dir.mkdir(parents=True, exist_ok=True)
+            training_dir = Path(tmpdir) / "training"
+            training_dir.mkdir()
+
+            if group_train_dir:
+                group_path = Path(group_train_dir).resolve()
+                jsonl_files = sorted(
+                    f for f in group_path.iterdir()
+                    if f.is_file() and f.suffix.lower() in _JSONL_EXTENSIONS
+                )
+                if not jsonl_files:
+                    raise click.ClickException(
+                        f"No JSONL files found in {group_path}")
+                click.echo(f"  [2/4] Group training from {len(jsonl_files)} JSONL file(s)...")
+
+                total_train_size = 0
+                for idx, jl_file in enumerate(jsonl_files):
+                    sample_tmp = Path(tmpdir) / f"group_{idx:03d}"
+                    try:
+                        sample_tsvs, _ = jsonl_codec.encode(
+                            jl_file, sample_tmp, verbose=False)
+                    except Exception as e:
+                        click.echo(f"    Warning: skipping {jl_file.name}: {e}")
+                        continue
+                    for sf in sample_tsvs:
+                        sz = sf.stat().st_size
+                        dest = training_dir / f"sample_{idx:03d}_{sf.name}"
+                        if sz > train_sample_bytes:
+                            sz = _truncate_tsv_at_newline(sf, dest, train_sample_bytes)
+                        else:
+                            shutil.copy2(sf, dest)
+                        total_train_size += sz
+                    shutil.rmtree(sample_tmp, ignore_errors=True)
+
+                # Include input file's TSVs if not already in group
+                input_in_group = any(
+                    f.resolve() == input_path for f in jsonl_files)
+                if not input_in_group:
+                    for sf in tsv_paths:
+                        dest = training_dir / f"sample_{len(jsonl_files):03d}_{sf.name}"
+                        shutil.copy2(sf, dest)
+                        total_train_size += sf.stat().st_size
+
+                num_samples = len(list(training_dir.iterdir()))
+                click.echo(f"    {num_samples} samples, "
+                           f"total {total_train_size:,} bytes")
+            else:
+                click.echo(f"  [2/4] Training CSV compressor on type TSVs...")
+                # Copy all type TSVs to training dir (truncated if needed)
+                total_sample_size = 0
+                for sf in tsv_paths:
+                    sz = sf.stat().st_size
+                    if sz > train_sample_bytes:
+                        dest = training_dir / sf.name
+                        sz = _truncate_tsv_at_newline(sf, dest, train_sample_bytes)
+                    else:
+                        shutil.copy2(sf, training_dir / sf.name)
+                    total_sample_size += sz
+                click.echo(f"    Training on {len(tsv_paths)} type TSV(s): "
+                           f"{total_sample_size:,} bytes")
+
+            # Use serial profile for training (csv profile triggers an OpenZL
+            # assertion in encode_frameheader.c with high-cardinality string
+            # columns).  The trained compressor still compresses TSVs well.
+            openzl.train(
+                sample_dir=training_dir,
+                output_file=compressor_path,
+                profile="serial",
+                use_all_samples=True,
+                no_ace_successors=True,
+                threads=train_threads,
+                max_time_secs=max_time_secs,
+                force=True,
+                verbose=verbose,
+            )
+
+            train_elapsed = time.time() - t0
+            if compressor_path.is_file() and compressor_path.stat().st_size > 0:
+                click.echo(f"    Trained compressor: {compressor_path.stat().st_size:,} bytes "
+                           f"in {train_elapsed:.1f}s")
+                click.echo(f"    Saved to: {compressor_path}")
+            else:
+                click.echo("    Warning: training produced no output, falling back to csv profile")
+                compressor_path = None
+        elif not no_trained:
+            if compressor_path.is_file() and compressor_path.stat().st_size > 0:
+                click.echo(f"  Using trained CSV compressor: {compressor_path}")
+            else:
+                compressor_path = None
+        else:
+            compressor_path = None
+
+        # Step 3: Compress TSVs with OpenZL CSV profile (parallel)
+        step_label = "[3/4]" if do_train else "[2/3]"
+        click.echo(f"  {step_label} Compressing with OpenZL CSV profile...")
+
+        entries = {}
+
+        # meta.json — compress with OpenZL (can be large for many types/records)
+        meta_compressed = compressed_dir / "meta.json.zl"
+        openzl.compress(
+            meta_path, meta_compressed,
+            profile="serial",
+            force=True, verbose=verbose,
+        )
+        meta_orig_size = meta_path.stat().st_size
+        meta_comp_data = meta_compressed.read_bytes()
+        entries["meta.json"] = (meta_comp_data, meta_orig_size)
+        if verbose:
+            ratio = meta_orig_size / len(meta_comp_data) if meta_comp_data else 0
+            click.echo(f"    meta.json: {meta_orig_size:,} -> "
+                       f"{len(meta_comp_data):,} ({ratio:.2f}x) [serial]")
+
+        def _compress_tsv_part(part_path, comp_path):
+            compressed_file = compressed_dir / (part_path.name + ".zl")
+            if comp_path and Path(comp_path).is_file():
+                try:
+                    openzl.compress(
+                        part_path, compressed_file,
+                        compressor=comp_path,
+                        force=True, verbose=verbose,
+                    )
+                    return part_path.name, compressed_file, "trained"
+                except openzl.OpenZLError:
+                    click.echo(f"    Warning: trained compressor failed for "
+                               f"{part_path.name}, falling back to csv profile")
+            openzl.compress(
+                part_path, compressed_file,
+                profile="csv",
+                profile_arg="\t",
+                force=True, verbose=verbose,
+            )
+            return part_path.name, compressed_file, "csv"
+
+        num_workers = min(compress_jobs, len(tsv_paths))
+        total_orig = 0
+        total_comp = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(_compress_tsv_part, p, compressor_path): p
+                for p in tsv_paths
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                name, compressed_file, mode = fut.result()
+                orig_size = futures[fut].stat().st_size
+                compressed_data = compressed_file.read_bytes()
+                entries[name] = (compressed_data, orig_size)
+                total_orig += orig_size
+                total_comp += len(compressed_data)
+                if verbose:
+                    ratio = orig_size / len(compressed_data) if compressed_data else 0
+                    click.echo(f"    {name}: {orig_size:,} -> "
+                               f"{len(compressed_data):,} ({ratio:.2f}x) [{mode}]")
+
+        if total_comp > 0:
+            click.echo(f"    TSV total: {total_orig:,} -> {total_comp:,} "
+                       f"({total_orig / total_comp:.2f}x)")
+
+        # Step 4: Bundle into .zljsonl container
+        step_label = "[4/4]" if do_train else "[3/3]"
+        click.echo(f"  {step_label} Creating .zljsonl container...")
+        create_zljsonl(output_path, entries)
+
+        elapsed = time.time() - t0
+        output_size = output_path.stat().st_size
+        ratio = input_size / output_size if output_size > 0 else 0
+
+        click.echo(
+            f"\nOutput: {output_path.name} ({output_size:,} bytes)\n"
+            f"Ratio:  {ratio:.3f}x  "
+            f"(saved {(1 - output_size / input_size) * 100:.1f}%)\n"
+            f"Time:   {elapsed:.1f}s"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# JSONL Decompress
+# ---------------------------------------------------------------------------
+
+def decompress_lossless_jsonl(input_path: Path, output_path: Path,
+                               verbose: bool = False):
+    """Decompress a .zljsonl container back to original JSONL."""
+    t0 = time.time()
+    tmpdir = tempfile.mkdtemp(prefix="nyx_lossless_dec_jsonl_")
+
+    try:
+        extract_dir = Path(tmpdir) / "extracted"
+        tsv_dir = Path(tmpdir) / "tsv_parts"
+        tsv_dir.mkdir()
+
+        # Step 1: Extract .zljsonl container
+        click.echo("  [1/3] Extracting .zljsonl container...")
+        entries = extract_zljsonl(input_path, extract_dir)
+
+        if verbose:
+            for name, path in sorted(entries.items()):
+                click.echo(f"    {name}: {path.stat().st_size:,} bytes")
+
+        # All entries are compressed (TSVs + meta.json)
+        all_compressed = dict(entries)
+
+        # Step 2: Decompress all entries (parallel)
+        click.echo("  [2/3] Decompressing type TSVs + meta with OpenZL...")
+
+        if all_compressed:
+            num_workers = min(os.cpu_count() or 4, len(all_compressed))
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers
+            ) as executor:
+                futures = {}
+                for name, extracted_path in sorted(all_compressed.items()):
+                    decompressed_path = tsv_dir / name
+                    fut = executor.submit(
+                        _decompress_one,
+                        name, extracted_path, decompressed_path, verbose,
+                    )
+                    futures[fut] = name
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()
+
+        if verbose:
+            for p in sorted(tsv_dir.iterdir()):
+                click.echo(f"    {p.name}: {p.stat().st_size:,} bytes")
+
+        # Step 3: Decode TSVs back to JSONL
+        click.echo("  [3/3] Reconstructing JSONL from type-grouped TSVs...")
+        jsonl_codec.decode(tsv_dir, output_path, verbose=verbose)
 
         elapsed = time.time() - t0
         output_size = output_path.stat().st_size

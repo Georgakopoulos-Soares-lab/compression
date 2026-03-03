@@ -11,9 +11,11 @@ from ._lossless import (
     decompress_lossless_fasta,
     decompress_lossless_fastq,
     decompress_lossless_vcf,
+    decompress_lossless_jsonl,
     ZLFASTA_MAGIC,
     ZLFASTQ_MAGIC,
     ZLVCF_MAGIC,
+    ZLJSONL_MAGIC,
 )
 
 
@@ -25,7 +27,7 @@ from ._lossless import (
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output.")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
 def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
-    """Decompress a Nyx archive (.zlfasta, .zlfastq, .zlvcf, or .nyx).
+    """Decompress a Nyx archive (.zlfasta, .zlfastq, .zlvcf, .zljsonl, or .nyx).
 
     Auto-detects the container format from magic bytes and routes to
     the appropriate decompression pipeline. Lossless containers produce
@@ -36,6 +38,7 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
       .zlfasta   Lossless FASTA container → byte-identical .fasta
       .zlfastq   Lossless FASTQ container → byte-identical .fastq
       .zlvcf     Lossless VCF container   → byte-identical .vcf
+      .zljsonl   Lossless JSONL container → byte-identical .jsonl
       .nyx       Tar-based archive        → decompressed chunks directory
 
     \b
@@ -113,6 +116,27 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
 
         click.echo(f"Input: {input_path.name} (VCF lossless container)")
         decompress_lossless_vcf(input_path, output_path, verbose=verbose)
+
+    elif magic == ZLJSONL_MAGIC:
+        # --- Lossless JSONL ---
+        if output_file is None:
+            name = input_path.name
+            if name.endswith(".zljsonl"):
+                output_name = name[: -len(".zljsonl")]
+            else:
+                output_name = name + ".jsonl"
+            output_path = input_path.parent / output_name
+        else:
+            output_path = Path(output_file).resolve()
+
+        if output_path.exists() and not force:
+            raise click.ClickException(
+                f"Output already exists: {output_path}\n"
+                f"Use -f/--force to overwrite."
+            )
+
+        click.echo(f"Input: {input_path.name} (JSONL lossless container)")
+        decompress_lossless_jsonl(input_path, output_path, verbose=verbose)
 
     else:
         # --- .nyx archive (tar-based) ---

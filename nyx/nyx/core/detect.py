@@ -11,6 +11,7 @@ EXTENSION_MAP = {
     ".fastq": "fastq",
     ".fq": "fastq",
     ".vcf": "vcf",
+    ".jsonl": "jsonl",
 }
 
 
@@ -39,6 +40,12 @@ def detect_by_content(filepath: Path) -> Optional[str]:
         lines = head.split(b"\n", 3)
         if len(lines) >= 3 and lines[2].startswith(b"+"):
             return "fastq"
+
+    if head[0:1] == b"{":
+        # JSONL: first line is a valid JSON object
+        first_line = head.split(b"\n", 1)[0]
+        if first_line.rstrip().endswith(b"}"):
+            return "jsonl"
 
     return None
 
@@ -98,3 +105,8 @@ def detect_fasta_subtype(filepath: Path) -> str:
 def is_genomic(filetype: Optional[str]) -> bool:
     """Check if a file type is a supported genomic format."""
     return filetype in ("fasta", "fastq", "vcf")
+
+
+def is_structured(filetype: Optional[str]) -> bool:
+    """Check if a file type is a supported structured format (non-genomic lossless)."""
+    return filetype in ("jsonl",)
