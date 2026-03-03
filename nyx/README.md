@@ -88,10 +88,12 @@ Both `nyx/openzl/` and `nyx/bin/` are gitignored — only source code is tracked
 ## Quick Start
 
 ```bash
-# Lossless compression (auto-detects FASTA/FASTQ, byte-exact reconstruction)
+# Lossless compression (auto-detects FASTA/FASTQ/VCF, byte-exact reconstruction)
 nyx compress genome.fasta                     # → genome.fasta.zlfasta
 nyx compress reads.fastq                      # → reads.fastq.zlfastq
+nyx compress variants.vcf                     # → variants.vcf.zlvcf
 nyx decompress genome.fasta.zlfasta           # → genome.fasta (byte-identical)
+nyx decompress variants.vcf.zlvcf             # → variants.vcf (byte-identical)
 
 # Schema-aware compression (training-based, higher ratio)
 nyx compress genome.fasta --mode schema       # → genome.fasta.nyx
@@ -120,9 +122,10 @@ nyx compress <file> [OPTIONS]
 | FASTA (nucleotide) | Lossless packed NXF2 | `.zlfasta` |
 | FASTA (protein) | Lossless packed NXFP | `.zlfasta` |
 | FASTQ | Lossless CSV decomposition | `.zlfastq` |
+| VCF | Lossless header/body CSV split | `.zlvcf` |
 | Other | Generic OpenZL compression | `.nyx` |
 
-FASTA auto-detects nucleotide vs protein. FASTQ auto-detects Illumina vs generic headers for optimal dictionary encoding.
+FASTA auto-detects nucleotide vs protein. FASTQ auto-detects Illumina vs generic headers for optimal dictionary encoding. VCF splits header from body rows and compresses body parts using OpenZL's CSV profile with tab delimiter.
 
 **Options:**
 
@@ -152,8 +155,8 @@ FASTA auto-detects nucleotide vs protein. FASTQ auto-detects Illumina vs generic
 
 | Mode | When to use | What it does |
 |------|-------------|--------------|
-| `auto` | Default — picks the best mode automatically | Lossless for FASTA/FASTQ, schema for VCF, generic for other |
-| `lossless` | FASTA/FASTQ — byte-exact reconstruction | C++ codec → binary streams → OpenZL → `.zlfasta`/`.zlfastq` |
+| `auto` | Default — picks the best mode automatically | Lossless for FASTA/FASTQ/VCF, generic for other |
+| `lossless` | FASTA/FASTQ/VCF — byte-exact reconstruction | C++ codec (FASTA/FASTQ) or Python codec (VCF) → compressed streams → `.zlfasta`/`.zlfastq`/`.zlvcf` |
 | `schema` | Genomic files with SDDL schemas | Preprocessor → SDDL training → parallel compression → `.nyx` |
 | `generic` | Any file, quick compression | OpenZL's generic `serial` profile → `.nyx` |
 | `inline` | Moderate compression without separate training | OpenZL inline training → `.nyx` |
@@ -170,6 +173,10 @@ nyx compress proteins.fasta --type protein          # explicit
 
 # FASTQ with training (improves ratio)
 nyx compress reads.fastq --train
+
+# VCF compression (auto-detected)
+nyx compress variants.vcf                          # → variants.vcf.zlvcf
+nyx compress variants.vcf --train                  # train CSV compressor first
 
 # Schema-aware compression
 nyx compress genome.fasta --mode schema
@@ -244,11 +251,13 @@ nyx decompress <file> [OPTIONS]
 |-----------|------------|--------|
 | `.zlfasta` | `ZLFASTA\0` | Byte-identical FASTA file |
 | `.zlfastq` | `ZLFASTQ\0` | Byte-identical FASTQ file |
+| `.zlvcf` | `ZLVCF\0\0\0` | Byte-identical VCF file |
 | `.nyx` | tar archive | Decompressed binary chunks |
 
 ```bash
 nyx decompress genome.fasta.zlfasta                # → genome.fasta
 nyx decompress reads.fastq.zlfastq -o reads.fastq  # → reads.fastq
+nyx decompress variants.vcf.zlvcf                  # → variants.vcf
 nyx decompress data.nyx                            # → data_decompressed/
 ```
 
@@ -326,6 +335,24 @@ nyx compress genome.fasta
 [bundle container] --> genome.fasta.zlfasta
 ```
 
+**Lossless pipeline (VCF):**
+
+```
+nyx compress variants.vcf
+    |
+    v
+[detect file type] --> "vcf" (##fileformat=VCF)
+    |
+    v
+[vcf_codec.encode()] --> header.vcf + part_NNN.tsv chunks (Python)
+    |
+    v
+[compress parts] --> .zl files (parallel, OpenZL CSV compressor)
+    |
+    v
+[bundle container] --> variants.vcf.zlvcf
+```
+
 **Schema pipeline (--mode schema):**
 
 ```
@@ -374,7 +401,7 @@ tar tf genome.fasta.nyx
 |--------|-----------|-------------|-----------|
 | FASTA (.fasta, .fa, .fna) | Content (`>`) + extension | Lossless (NXF2/NXFP packed) | `.zlfasta` |
 | FASTQ (.fastq, .fq) | Content (`@...+`) + extension | Lossless (CSV decomposition) | `.zlfastq` |
-| VCF (.vcf) | Content (`##fileformat=VCF`) | Schema (if SDDL available) | `.nyx` |
+| VCF (.vcf) | Content (`##fileformat=VCF`) | Lossless (header/body CSV split) | `.zlvcf` |
 | Generic (any other) | Fallback | Generic serial | `.nyx` |
 
 ## Adding a New File Type
@@ -411,7 +438,9 @@ nyx/
 │   └── genomic_preprocessor.cpp # FASTA/FASTQ/VCF → binary chunks (for schema-aware compression)
 ├── models/                     # Trained per-stream compressor models
 │   ├── lossless/               # FASTA stream compressors
-│   └── lossless_fastq/         # FASTQ stream compressors
+│   ├── lossless_fastq/         # FASTQ stream compressors
+│   ├── lossless_fastq_csv/     # FASTQ CSV-profile compressors
+│   └── lossless_vcf/           # VCF CSV-profile compressor
 ├── tests/                      # Pytest test suite (268 tests)
 │   ├── __init__.py
 │   ├── test_lossless.py        # FASTA round-trip tests
@@ -434,8 +463,10 @@ nyx/
     │   ├── openzl.py           # zli subprocess wrapper
     │   ├── codec.py            # FASTA codec Python wrapper
     │   ├── fastq_codec.py      # FASTQ codec Python wrapper
+    │   ├── vcf_codec.py        # VCF header/body splitter + reassembler (pure Python)
     │   ├── zlfasta.py          # .zlfasta container read/write
     │   ├── zlfastq.py          # .zlfastq container read/write
+    │   ├── zlvcf.py            # .zlvcf container read/write
     │   ├── preprocessor.py     # genomic_preprocessor wrapper
     │   ├── detect.py           # File type auto-detection
     │   ├── archive.py          # .nyx archive read/write

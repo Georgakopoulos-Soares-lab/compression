@@ -1,15 +1,18 @@
 # Project Context: Nyx — OpenZL Genomic Compression CLI
 
-> **Auto-generated reference.** Status: Python CLI Architecture (post-migration). Last scanned: 2026-02-28
+> **Auto-generated reference.** Status: Python CLI Architecture (post-migration). Last scanned: 2026-03-03
 
 ## 1. Executive Summary
 
 **Nyx** is a Python CLI tool that orchestrates [Meta's OpenZL](https://github.com/facebook/openzl) compression framework to provide seamless, schema-aware compression for genomic data formats (FASTA, FASTQ, VCF) as well as generic compression for any file type. It is a hybrid architecture: a **Python CLI orchestrator** (`click`-based) drives C++ binaries — OpenZL's `zli`, a custom `genomic_preprocessor`, and purpose-built `fasta_codec`/`fastq_codec` lossless codecs — via `subprocess` calls.
 
-Nyx supports two compression pipelines:
+All compression is unified under a single `nyx compress` command that auto-detects the input format and routes to the best pipeline:
 
-1. **Schema-aware compression** (`nyx compress`): Preprocesses genomic data into SDDL-described binary formats, trains domain-specific compressors, compresses in parallel, and bundles results into `.nyx` archives.
-2. **Lossless stream compression** (`nyx compress-lossless`): For FASTA, encodes into packed binary chunks (NXF2 for nucleotide, NXFP for protein) described by SDDL schemas, trains a single domain-specific compressor, and compresses all chunks. For FASTQ, decomposes into typed binary streams and compresses each independently. Both bundle into `.zlfasta`/`.zlfastq` containers with byte-exact reconstruction. Auto-detects nucleotide vs protein FASTA.
+1. **Lossless FASTA compression:** Encodes into packed binary chunks (NXF2 for nucleotide, NXFP for protein) described by SDDL schemas, trains a single domain-specific compressor, and compresses all chunks. Bundles into `.zlfasta` containers with byte-exact reconstruction. Auto-detects nucleotide vs protein.
+2. **Lossless FASTQ compression:** Decomposes FASTQ records into a tab-separated CSV representation, compresses with OpenZL's CSV profile. Bundles into `.zlfastq` containers with byte-exact reconstruction.
+3. **Lossless VCF compression:** Splits VCF into header + tab-delimited body chunks (~40 MiB each, line-safe boundaries), compresses body parts with OpenZL's CSV/tab profile (column-aware compression), bundles into `.zlvcf` containers with byte-exact reconstruction. Achieves 170x+ compression on population-scale VCF files.
+4. **Schema-aware compression** (`--mode schema`): Preprocesses genomic data into SDDL-described binary formats, trains domain-specific compressors, compresses in parallel, and bundles results into `.nyx` archives.
+5. **Generic compression:** Any file type via OpenZL's generic `serial` profile → `.nyx` archives.
 
 Nyx replaces an earlier bash-script-driven pipeline with a proper Python package that can be `pip install`-ed and invoked as a single `nyx compress genome.fasta` command.
 
@@ -26,6 +29,8 @@ Nyx follows a **CLI orchestrator + native binary** pattern. The Python layer han
 | `fasta_codec` | `nyx/tools/fasta_codec.cpp` + `codec_common.h` | `g++ -O3 -std=c++17 -pthread` | Lossless FASTA ↔ binary stream encoding/decoding (parallel) |
 | `fastq_codec` | `nyx/tools/fastq_codec.cpp` + `codec_common.h` | `g++ -O3 -std=c++17 -pthread` | Lossless FASTQ ↔ binary stream encoding/decoding (parallel) |
 
+VCF compression does not use a C++ codec — the header/body split is handled in pure Python by `nyx/nyx/core/vcf_codec.py`.
+
 ### 2.2 The Python <-> OpenZL Bridge
 
 **Mechanism:** `subprocess.run()` and `subprocess.Popen()` calls to the `zli` binary.
@@ -38,6 +43,8 @@ Nyx follows a **CLI orchestrator + native binary** pattern. The Python layer han
 | `nyx/nyx/core/preprocessor.py` | `genomic_preprocessor` binary | `preprocess()` |
 | `nyx/nyx/core/codec.py` | `fasta_codec` binary | `encode()`, `decode()`, `encode_packed()`, `decode_packed()`, `encode_protein_packed()`, `decode_protein_packed()` |
 | `nyx/nyx/core/fastq_codec.py` | `fastq_codec` binary | `encode()`, `decode()`, `validate()` |
+| `nyx/nyx/core/vcf_codec.py` | Pure Python (no binary) | `encode()`, `decode()` — VCF header/body split and reassembly |
+| `nyx/nyx/core/zlvcf.py` | Pure Python (no binary) | `create_zlvcf()`, `extract_zlvcf()` — `.zlvcf` container read/write |
 | `nyx/nyx/core/sample.py` | `scripts/make_train_sample.py` | `create_training_sample()` |
 
 **Binary resolution** (`nyx/nyx/utils/paths.py`):
@@ -93,7 +100,7 @@ genome.fasta.nyx
 ### 2.4 Lossless Pipeline — FASTA (Packed NXF2/NXFP)
 
 ```
-nyx compress-lossless genome.fasta
+nyx compress genome.fasta
     │
     ▼
 [Python: detect file type]  ─── "fasta"
@@ -119,10 +126,10 @@ nyx compress-lossless genome.fasta
 genome.fasta.zlfasta
 ```
 
-### 2.5 Lossless Pipeline — FASTQ (Per-Stream)
+### 2.5 Lossless Pipeline — FASTQ (CSV Decomposition)
 
 ```
-nyx compress-lossless reads.fastq
+nyx compress reads.fastq
     │
     ▼
 [Python: detect file type]  ─── "fastq"
@@ -143,6 +150,34 @@ reads.fastq.zlfastq
 
 Decompression reverses the pipeline: extract container → decompress streams/chunks → C++ codec decode → byte-identical original file.
 
+### 2.6 Lossless Pipeline — VCF (Header/Body CSV Split)
+
+```
+nyx compress variants.vcf
+    │
+    ▼
+[Python: detect file type]  ─── "vcf" (##fileformat=VCF header)
+    │
+    ▼
+[Python: vcf_codec.encode()]  ─── Pure Python header/body split
+    │  Separates header (## meta + #CHROM line) from data rows
+    │  Splits body into ~40 MiB line-safe TSV chunks
+    │  Writes header.vcf, part_000.tsv, part_001.tsv, ..., meta.json
+    ▼
+[C++: train CSV compressor]  ─── zli train --profile csv --profile-arg '\t' (if --train)
+    │  Learns per-column compression for tab-separated data
+    │  Produces vcf_csv.zl_compressor
+    ▼
+[C++: compress body parts]  ─── zli compress (parallel via ThreadPoolExecutor)
+    │  Each TSV part compressed with trained CSV compressor
+    │  Header compressed with serial profile (if >1 KB)
+    ▼
+[Python: bundle container]  ─── .zlvcf (magic ZLVCF\0\0\0 + CRC32)
+    │
+    ▼
+variants.vcf.zlvcf
+```
+
 ## 3. The Python CLI
 
 **Entry Point:** `nyx/nyx/cli.py` → function `main()` registered as `nyx` console script in `pyproject.toml`
@@ -155,12 +190,8 @@ Decompression reverses the pipeline: extract container → decompress streams/ch
 
 | Command | Key Arguments / Flags | Purpose | Implementation |
 |---------|----------------------|---------|----------------|
-| `nyx compress` | `<file> [-o PATH] [--mode MODE] [--sddl PATH] [--type TYPE] [--threads N] [--max-time-secs N] [--compress-jobs N] [--target-train-mib N] [--trainer ALGO] [--no-clustering] [--benchmark] [--keep-temp] [-v] [-f]` | Schema-aware compression. Detects type, preprocesses, trains, compresses, bundles `.nyx` archive. Optionally benchmarks against competitors. | `nyx/nyx/commands/compress.py:compress_cmd` |
-| `nyx decompress` | `<file.nyx> [-o PATH] [-f] [--keep-temp] [-v]` | Extracts `.nyx` archive, decompresses all chunks via `zli decompress` | `nyx/nyx/commands/decompress.py:decompress_cmd` |
-| `nyx compress-lossless` | `<file> [-o PATH] [-t TYPE] [--threads N] [--train] [--models-dir PATH] [--no-trained] [-v] [-f]` | **Unified lossless compression.** Auto-detects FASTA/FASTQ, encodes into typed binary streams, compresses each with OpenZL, bundles into `.zlfasta`/`.zlfastq`. Byte-exact reconstruction. | `nyx/nyx/commands/compress_lossless.py:compress_lossless_cmd` |
-| `nyx decompress-lossless` | `<file> [-o PATH] [-v] [-f]` | **Unified lossless decompression.** Auto-detects container type from magic bytes (`ZLFASTA\0`/`ZLFASTQ\0`), decompresses streams, reconstructs original file. | `nyx/nyx/commands/decompress_lossless.py:decompress_lossless_cmd` |
-| `nyx compress-lossless-fastq` | `<file> [-o PATH] [--train] [--models-dir PATH] [--no-trained] [--train-sample-mib N] [--max-time-secs N] [--train-threads N] [--compress-jobs N] [-v] [-f]` | Format-specific FASTQ lossless compression. Illumina headers auto-detected and dictionary-encoded. Parallel stream compression. Trained models reusable across all FASTQ files. | `nyx/nyx/commands/compress_lossless_fastq.py` |
-| `nyx decompress-lossless-fastq` | `<file> [-o PATH] [-v] [-f]` | Format-specific FASTQ lossless decompression. Parallel stream decompression. Supports v1/v2/v3 archives. | `nyx/nyx/commands/decompress_lossless_fastq.py` |
+| `nyx compress` | `<file> [-o PATH] [--mode MODE] [--sddl PATH] [-t TYPE] [--train] [--models-dir DIR] [--no-trained] [--group-train DIR] [--threads N] [--train-threads N] [--max-time-secs N] [--compress-jobs N] [--train-sample-mib N] [--trainer ALGO] [--no-clustering] [--benchmark] [--keep-temp] [-v] [-f]` | **Unified compression.** Auto-detects file type (FASTA/FASTQ/VCF/generic) and routes to the best pipeline. FASTA/FASTQ/VCF → lossless (`.zlfasta`/`.zlfastq`/`.zlvcf`). Other → schema or generic (`.nyx`). | `nyx/nyx/commands/compress.py:compress_cmd` |
+| `nyx decompress` | `<file> [-o PATH] [-f] [--keep-temp] [-v]` | **Unified decompression.** Auto-detects container format from magic bytes (`ZLFASTA\0`, `ZLFASTQ\0`, `ZLVCF\0\0\0`, or tar) and routes to the appropriate decompression pipeline. | `nyx/nyx/commands/decompress.py:decompress_cmd` |
 | `nyx train` | `<sample_dir> -o PATH [-p PROFILE] [--profile-arg PATH] [-c COMPRESSOR] [--threads N] [--max-time-secs N] [--use-all-samples] [--no-ace-successors] [--no-clustering] [--trainer ALGO] [-f] [-v]` | Direct passthrough to `zli train`. Unknown flags forwarded to zli. | `nyx/nyx/commands/train.py:train_cmd` |
 | `nyx benchmark` | `<input_dir> [-v]` | Direct passthrough to `zli benchmark`. Unknown flags forwarded. | `nyx/nyx/commands/benchmark.py:benchmark_cmd` |
 | `nyx inspect` | `<compressor_file> [-v]` | Inspect a trained compressor (JSON output). Passthrough to `zli inspect`. | `nyx/nyx/commands/inspect_cmd.py:inspect_cmd` |
@@ -241,7 +272,9 @@ compression/                              # Git repository root
     │
     ├── models/                           # Trained compressor models
     │   ├── lossless/                     # FASTA compressors (nucleotide_fasta.zl_compressor, protein_fasta.zl_compressor)
-    │   └── lossless_fastq/               # FASTQ per-stream compressors (*.zl_compressor)
+    │   ├── lossless_fastq/               # FASTQ per-stream compressors (*.zl_compressor)
+    │   ├── lossless_fastq_csv/           # FASTQ CSV-profile compressors (illumina/generic)
+    │   └── lossless_vcf/                 # VCF CSV-profile compressor (vcf_csv.zl_compressor)
     │
     ├── tests/                            # Pytest test suite (180 tests)
     │   ├── __init__.py
@@ -257,12 +290,9 @@ compression/                              # Git repository root
     │   │
     │   ├── commands/                     # CLI command implementations
     │   │   ├── __init__.py               # Empty
-    │   │   ├── compress.py               # nyx compress — schema-aware pipeline (504 lines)
-    │   │   ├── compress_lossless.py      # nyx compress-lossless — unified FASTA/FASTQ (auto-detect)
-    │   │   ├── compress_lossless_fastq.py  # nyx compress-lossless-fastq — explicit FASTQ
-    │   │   ├── decompress.py             # nyx decompress — .nyx archive extraction
-    │   │   ├── decompress_lossless.py    # nyx decompress-lossless — unified (auto-detect container)
-    │   │   ├── decompress_lossless_fastq.py # nyx decompress-lossless-fastq — explicit FASTQ
+    │   │   ├── compress.py               # nyx compress — unified compression (all pipelines)
+    │   │   ├── decompress.py             # nyx decompress — unified decompression (all formats)
+    │   │   ├── _lossless.py              # Internal: lossless pipeline functions (FASTA/FASTQ/VCF)
     │   │   ├── train.py                  # nyx train — passthrough to zli train
     │   │   ├── benchmark.py              # nyx benchmark — passthrough to zli benchmark
     │   │   ├── inspect_cmd.py            # nyx inspect — passthrough to zli inspect
@@ -274,10 +304,12 @@ compression/                              # Git repository root
     │   │   ├── openzl.py                 # zli subprocess wrapper (268 lines)
     │   │   ├── codec.py                  # fasta_codec subprocess wrapper (encode/decode/validate)
     │   │   ├── fastq_codec.py            # fastq_codec subprocess wrapper (encode/decode/validate)
+    │   │   ├── vcf_codec.py              # VCF header/body splitter + reassembler (pure Python)
     │   │   ├── zlfasta.py                # .zlfasta container read/write (magic: ZLFASTA\0)
     │   │   ├── zlfastq.py                # .zlfastq container read/write (magic: ZLFASTQ\0)
+    │   │   ├── zlvcf.py                  # .zlvcf container read/write (magic: ZLVCF\0\0\0)
     │   │   ├── preprocessor.py           # genomic_preprocessor subprocess wrapper (74 lines)
-    │   │   ├── detect.py                 # File type auto-detection (content + extension) (71 lines)
+    │   │   ├── detect.py                 # File type auto-detection (content + extension, incl. VCF)
     │   │   ├── archive.py                # .nyx tar archive read/write (113 lines)
     │   │   ├── sample.py                 # Training sample creation wrapper (67 lines)
     │   │   ├── benchmark.py              # Competitor benchmarks (gzip/pigz/zstd) (250 lines)
@@ -299,13 +331,13 @@ compression/                              # Git repository root
 
 - **Purpose:** Defines the Click `@click.group()` and registers all subcommands.
 - **Entry point registration:** `pyproject.toml` → `[project.scripts]` → `nyx = "nyx.cli:main"`
-- **Commands registered:** `compress`, `decompress`, `compress-lossless`, `decompress-lossless`, `compress-lossless-fastq`, `decompress-lossless-fastq`, `train`, `benchmark`, `inspect`, `list-profiles`, `build`
+- **Commands registered:** `compress`, `decompress`, `train`, `benchmark`, `inspect`, `list-profiles`, `build`
 - **Version:** `nyx --version` reports from `nyx/__init__.py` (`0.1.0`)
 
 ### 5.2 Compress Command: `nyx/nyx/commands/compress.py`
 
-- **Purpose:** The primary command. Orchestrates the full compression pipeline across all 4 modes.
-- **Size:** 504 lines — the largest file in the Python codebase.
+- **Purpose:** The unified compression command. Orchestrates all pipelines: lossless (FASTA/FASTQ/VCF), schema, generic, and inline.
+- **Size:** ~734 lines — the largest file in the Python codebase.
 - **Key functions:**
 
 | Function | Lines | Description |
@@ -324,56 +356,39 @@ compression/                              # Git repository root
 
 ### 5.3 Decompress Command: `nyx/nyx/commands/decompress.py`
 
-- **Purpose:** Extracts a `.nyx` archive and decompresses all chunks.
-- **Flow:** Extract tar → read `manifest.json` → iterate compressed chunks → `zli decompress` each.
-- **Limitation:** Output is decompressed binary chunks, not reconstructed original text format. The README explicitly notes: "Postprocessing (binary chunks back to original text format) will be added in a future release."
+- **Purpose:** Unified decompression for all Nyx container formats. Auto-detects format from magic bytes.
+- **Supported formats:**
+  - `.zlfasta` (magic `ZLFASTA\0`) → byte-identical FASTA reconstruction
+  - `.zlfastq` (magic `ZLFASTQ\0`) → byte-identical FASTQ reconstruction
+  - `.zlvcf` (magic `ZLVCF\0\0\0`) → byte-identical VCF reconstruction
+  - `.nyx` (tar archive) → decompressed binary chunks directory
+- **Flow (lossless):** Read magic bytes → extract container → decompress streams/chunks → codec decode → original file
+- **Flow (.nyx):** Extract tar → read `manifest.json` → iterate compressed chunks → `zli decompress` each → output directory
 
-### 5.4 Lossless Compress Command: `nyx/nyx/commands/compress_lossless.py`
+### 5.4 Lossless Pipelines: `nyx/nyx/commands/_lossless.py`
 
-- **Purpose:** Unified lossless compression for FASTA and FASTQ with byte-exact reconstruction. Auto-detects input format and FASTA subtype (nucleotide vs protein).
-- **Key features:**
-  - Auto-detection via `detect_filetype()` (or explicit `--type fasta`/`--type fastq`/`--type protein`)
-  - FASTA subtype auto-detection via `detect_fasta_subtype()` — uses E/F/I/L/P/Q heuristic
-  - **FASTA (nucleotide):** Encodes into NXF2 packed binary chunks via `codec.encode_packed()`, trains single SDDL compressor (`nucleotide_fasta.zl_compressor`), compresses all chunks in parallel
-  - **FASTA (protein):** Encodes into NXFP packed binary chunks via `codec.encode_protein_packed()`, trains single SDDL compressor (`protein_fasta.zl_compressor`), compresses all chunks in parallel
-  - **FASTQ:** Routes to per-stream compression path (legacy approach with `fastq_codec.encode()`)
-  - Group training via `--group-train-dir` — samples first chunk from each FASTA file in directory
-  - Auto-chunking for large files (>500 MiB NXF2/NXFP chunks) to stay within zli limits
-  - Bundles into `.zlfasta` or `.zlfastq` container
+- **Purpose:** Internal module consolidating all lossless pipeline functions for FASTA, FASTQ, and VCF. Called by `compress.py` and `decompress.py` — has no CLI commands of its own.
+- **Key functions:**
+  - `compress_fasta_packed()` — Nucleotide FASTA → NXF2 packed binary → `.zlfasta`
+  - `compress_protein_packed()` — Protein FASTA → NXFP packed binary → `.zlfasta`
+  - `compress_csv_fastq()` — FASTQ → CSV/TSV decomposition → `.zlfastq`
+  - `compress_vcf()` — VCF → header/body split → CSV/tab compression → `.zlvcf`
+  - `decompress_lossless_fasta()` — `.zlfasta` → byte-identical FASTA
+  - `decompress_lossless_fastq()` — `.zlfastq` → byte-identical FASTQ
+  - `decompress_lossless_vcf()` — `.zlvcf` → byte-identical VCF
+- **Auto-detection:** File type detected by `detect_filetype()`, FASTA subtype by `detect_fasta_subtype()` (E/F/I/L/P/Q heuristic)
+- **Training:** All pipelines support `--train` (train on input file) and `--group-train` (train on directory of samples)
+- **Models directories:**
+  - `models/lossless/` — FASTA compressors (`nucleotide_fasta.zl_compressor`, `protein_fasta.zl_compressor`)
+  - `models/lossless_fastq_csv/` — FASTQ CSV compressor (`fastq_csv.zl_compressor`)
+  - `models/lossless_vcf/` — VCF CSV compressor (`vcf_csv.zl_compressor`)
 
-- **FASTA Pipeline (NXF2/NXFP):**
+### 5.5 VCF Codec: `nyx/nyx/core/vcf_codec.py`
 
-```
-input.fasta
-    │
-    ▼
-[detect type] → "fasta" → [detect subtype] → "nucleotide" or "protein"
-    │
-    ▼
-[C++ encode-packed / encode-protein-packed] → NXF2/NXFP packed binary chunks
-    │
-    ▼ (optional)
-[train single SDDL compressor] → nucleotide_fasta.zl_compressor / protein_fasta.zl_compressor
-    │
-    ▼
-[OpenZL compress chunks in parallel] → .zl compressed chunks
-    │
-    ▼
-[bundle container] → input.fasta.zlfasta
-```
-
-- **FASTQ Pipeline (per-stream):** Same as before — `fastq_codec encode` → per-stream OpenZL compression → `.zlfastq` container
-
-### 5.5 Lossless Decompress Command: `nyx/nyx/commands/decompress_lossless.py`
-
-- **Purpose:** Unified lossless decompression from `.zlfasta` or `.zlfastq` containers. Auto-detects container type from magic bytes.
-- **Magic bytes:** `ZLFASTA\0` (8 bytes) for FASTA, `ZLFASTQ\0` (8 bytes) for FASTQ
-- **Packed format detection:** `_is_packed_format()` checks for `chunk_*.bin` entries → routes to packed decompression path
-- **Subtype detection:** `_detect_packed_subtype()` reads magic from first decompressed chunk — "NXF2" → `codec.decode_packed()`, "NXFP" → `codec.decode_protein_packed()`
-- **Parallel decompression:** All chunks/streams decompressed in parallel via `ThreadPoolExecutor`
-- **Pipeline (packed FASTA):** Extract container → decompress all chunks in parallel → detect NXF2/NXFP → decode via C++ codec → original file
-- **Pipeline (per-stream FASTQ):** Extract container → decompress streams → reassemble chunked streams → decode via C++ codec → original file
-- **Output:** Byte-identical reconstruction of the original input file
+- **Purpose:** Pure Python VCF header/body splitter and reassembler. No C++ binary required.
+- **`encode()`:** Splits VCF into header (all `#` lines) + body TSV parts (~40 MiB each, line-safe boundaries) + `meta.json` manifest.
+- **`decode()`:** Concatenates header + decompressed body parts back into byte-identical VCF.
+- **Why not SDDL:** VCF is tabular data best served by OpenZL's CSV profile (per-column compression). No SDDL schema is needed.
 
 ### 5.6 C++ Lossless Codecs
 
@@ -487,6 +502,14 @@ Protein encoding is simpler than nucleotide — no N-mask, ACGT-mask, 2-bit base
 - **Entries:** 10 compressed streams + `meta.bin` (uncompressed record metadata)
 - **Structure:** Same layout as `.zlfasta` but with additional FASTQ-specific streams
 - **Module:** `nyx/nyx/core/zlfastq.py` — `create_zlfastq()`, `extract_zlfastq()`
+
+#### `.zlvcf` container
+
+- **Magic:** `ZLVCF\0\0\0` (8 bytes)
+- **Entries:** Compressed TSV body parts + sidecar files (`header.vcf`, `meta.json`)
+- **Structure:** Magic (8B) + version (U32LE) + num_entries (U32LE) + entry directory (name_len, name, compressed_size, original_size per entry) + entry data blobs + CRC32 checksum (U32LE)
+- **Sidecars:** `header.vcf` stored raw or compressed with serial profile if >1 KB; `meta.json` stored raw or compressed
+- **Module:** `nyx/nyx/core/zlvcf.py` — `create_zlvcf()`, `extract_zlvcf()`
 
 ### 5.9 OpenZL Wrapper: `nyx/nyx/core/openzl.py`
 
@@ -909,7 +932,7 @@ nyx list-profiles
 5. **Decompress each:** `openzl.decompress(chunk, out_file)` → subprocess: `zli decompress <chunk> --output <out>`
 6. **Output:** Decompressed binary chunks in output directory
 
-### 12.3 `nyx compress-lossless genome.fasta` (FASTA — packed NXF2/NXFP)
+### 12.3 `nyx compress genome.fasta` (FASTA — packed NXF2/NXFP)
 
 1. **CLI parsing:** `compress_lossless_cmd()` — parses Click args
 2. **Type detection:** `detect_filetype(input_path)` → `"fasta"` (or `--type` override)
@@ -920,7 +943,7 @@ nyx list-profiles
 7. **Compress chunks:** Parallel `openzl.compress()` with trained compressor or serial fallback → `.zl` data
 8. **Bundle:** `create_zlfasta(output_path, entries)` → `.zlfasta` container with magic bytes + CRC32
 
-### 12.4 `nyx decompress-lossless genome.fasta.zlfasta`
+### 12.4 `nyx decompress genome.fasta.zlfasta`
 
 1. **CLI parsing:** `decompress_lossless_cmd()` — parses args
 2. **Detect container:** Read first 8 bytes → `ZLFASTA\0` → format = "fasta"
@@ -952,7 +975,7 @@ Tests are organized in 7 tiers (FASTA) / 4 tiers (FASTQ):
 5. **Protein codec round-trips:** `encode-protein-packed` → `decode-protein-packed` for protein fixtures, including multi-chunk splitting and NXFP binary structure validation.
 5b. **Protein edge cases:** Single AA, all lowercase, all uppercase, stops, gaps, X chars, empty sequence, no trailing newline.
 6. **FASTA subtype detection:** Verifies `detect_fasta_subtype()` correctly identifies nucleotide vs protein fixtures.
-7. **Protein full pipeline:** Full `compress-lossless --type protein` → `decompress-lossless` round-trip with byte-identical verification.
+7. **Protein full pipeline:** Full `compress --type protein` → `decompress` round-trip with byte-identical verification.
 
 ### 13.3 Test Fixtures
 
@@ -998,7 +1021,7 @@ Decompression outputs binary chunks, not the original text format. The README ex
 
 ### 14.3 Lossless Compression Has Full Test Coverage
 
-The lossless pipeline (`compress-lossless` / `decompress-lossless`) has 121 automated tests covering FASTA and FASTQ round-trips, edge cases, CRLF handling, and multi-threaded encoding. The schema-aware pipeline (`compress` / `decompress`) still relies on manual testing.
+The lossless pipeline (FASTA/FASTQ/VCF via `compress` / `decompress`) has 180+ automated tests covering round-trips, edge cases, CRLF handling, and multi-threaded encoding. The schema-aware pipeline still relies on manual testing.
 
 ### 14.4 Stale Root README
 

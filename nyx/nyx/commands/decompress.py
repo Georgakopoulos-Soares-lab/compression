@@ -10,8 +10,10 @@ from ..core import openzl, archive
 from ._lossless import (
     decompress_lossless_fasta,
     decompress_lossless_fastq,
+    decompress_lossless_vcf,
     ZLFASTA_MAGIC,
     ZLFASTQ_MAGIC,
+    ZLVCF_MAGIC,
 )
 
 
@@ -23,7 +25,7 @@ from ._lossless import (
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output.")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
 def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
-    """Decompress a Nyx archive (.zlfasta, .zlfastq, or .nyx).
+    """Decompress a Nyx archive (.zlfasta, .zlfastq, .zlvcf, or .nyx).
 
     Auto-detects the container format from magic bytes and routes to
     the appropriate decompression pipeline. Lossless containers produce
@@ -33,21 +35,15 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
     Supported formats (auto-detected from magic bytes):
       .zlfasta   Lossless FASTA container → byte-identical .fasta
       .zlfastq   Lossless FASTQ container → byte-identical .fastq
+      .zlvcf     Lossless VCF container   → byte-identical .vcf
       .nyx       Tar-based archive        → decompressed chunks directory
-
-    \b
-    Flags:
-      -o, --output PATH    Output file or directory path (auto-determined if omitted)
-      -f, --force          Overwrite existing output
-      -v, --verbose        Verbose output
-      --keep-temp          Keep temporary directories for debugging
 
     \b
     Examples:
       nyx decompress genome.fasta.zlfasta                # → genome.fasta
       nyx decompress reads.fastq.zlfastq -o reads.fastq  # → reads.fastq
+      nyx decompress variants.vcf.zlvcf                  # → variants.vcf
       nyx decompress data.nyx                            # → data_decompressed/
-      nyx decompress genome.fasta.zlfasta -f             # overwrite existing
     """
     input_path = Path(input_file).resolve()
 
@@ -96,6 +92,27 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
 
         click.echo(f"Input: {input_path.name} (FASTQ lossless container)")
         decompress_lossless_fastq(input_path, output_path, verbose=verbose)
+
+    elif magic == ZLVCF_MAGIC:
+        # --- Lossless VCF ---
+        if output_file is None:
+            name = input_path.name
+            if name.endswith(".zlvcf"):
+                output_name = name[: -len(".zlvcf")]
+            else:
+                output_name = name + ".vcf"
+            output_path = input_path.parent / output_name
+        else:
+            output_path = Path(output_file).resolve()
+
+        if output_path.exists() and not force:
+            raise click.ClickException(
+                f"Output already exists: {output_path}\n"
+                f"Use -f/--force to overwrite."
+            )
+
+        click.echo(f"Input: {input_path.name} (VCF lossless container)")
+        decompress_lossless_vcf(input_path, output_path, verbose=verbose)
 
     else:
         # --- .nyx archive (tar-based) ---

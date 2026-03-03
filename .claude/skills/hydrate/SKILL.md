@@ -6,7 +6,7 @@ allowed-tools: Read, Bash, Grep, Glob
 
 # Hydrate — Project Context Loader
 
-You are loading context for the OpenZL FASTA compression project. Complete both phases before responding to any further instructions.
+You are loading context for the Nyx genomic compression CLI project. Complete both phases before responding to any further instructions.
 
 ## Phase 1: Load Static Context
 

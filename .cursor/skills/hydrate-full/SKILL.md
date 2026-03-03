@@ -5,7 +5,7 @@ description: Full hydration — loads project context, gathers git state, AND fe
 
 # Hydrate Full — Project Context + Live OpenZL Documentation
 
-You are loading the complete context for the OpenZL FASTA compression project, including live official documentation from the web. Complete ALL THREE phases before responding.
+You are loading the complete context for the Nyx genomic compression CLI project, including live official documentation from the web. Complete ALL THREE phases before responding.
 
 ## Phase 1: Load Project Context
 

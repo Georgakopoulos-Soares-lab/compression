@@ -5,7 +5,7 @@ description: Load full project context by reading PROJECT_CONTEXT.md and gatheri
 
 # Hydrate — Project Context Loader
 
-Load context for the OpenZL FASTA compression project. Complete both phases before responding to any further instructions.
+Load context for the Nyx genomic compression CLI project. Complete both phases before responding to any further instructions.
 
 ## Phase 1: Load Static Context
 

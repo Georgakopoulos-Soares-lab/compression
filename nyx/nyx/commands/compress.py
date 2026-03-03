@@ -24,8 +24,10 @@ from ._lossless import (
     compress_fasta_packed,
     compress_protein_packed,
     compress_csv_fastq,
+    compress_vcf,
     DEFAULT_FASTA_MODELS_DIR,
     DEFAULT_CSV_MODELS_DIR,
+    DEFAULT_VCF_MODELS_DIR,
 )
 
 
@@ -167,7 +169,7 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
 
     # --- Auto-select mode ---
     if mode == "auto":
-        if detected in ("fasta", "fastq"):
+        if detected in ("fasta", "fastq", "vcf"):
             mode = "lossless"
         elif genomic:
             cfg = SCHEMA_REGISTRY.get(detected)
@@ -179,9 +181,9 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
             mode = "generic"
 
     # --- Validate mode + options ---
-    if mode == "lossless" and detected not in ("fasta", "fastq"):
+    if mode == "lossless" and detected not in ("fasta", "fastq", "vcf"):
         raise click.UsageError(
-            f"Lossless mode requires FASTA or FASTQ input, "
+            f"Lossless mode requires FASTA, FASTQ, or VCF input, "
             f"but detected: {detected or 'unknown'}. "
             f"Use --type to override or --mode generic."
         )
@@ -210,6 +212,8 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
             output_path = input_path.parent / (input_path.name + ".zlfasta")
         elif mode == "lossless" and detected == "fastq":
             output_path = input_path.parent / (input_path.name + ".zlfastq")
+        elif mode == "lossless" and detected == "vcf":
+            output_path = input_path.parent / (input_path.name + ".zlvcf")
         else:
             output_path = input_path.parent / (input_path.name + ".nyx")
     else:
@@ -373,6 +377,22 @@ def _run_lossless(input_path, output_path, detected, filetype, do_train,
             input_path=input_path,
             output_path=output_path,
             models_dir=csv_models,
+            do_train=do_train,
+            no_trained=no_trained,
+            verbose=verbose,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            train_sample_bytes=train_sample_bytes,
+            compress_jobs=compress_jobs,
+            group_train_dir=group_train,
+        )
+    elif detected == "vcf":
+        click.echo(f"Compressing {input_path.name} (lossless VCF)")
+        vcf_models = Path(models_dir) if models_dir else DEFAULT_VCF_MODELS_DIR
+        compress_vcf(
+            input_path=input_path,
+            output_path=output_path,
+            models_dir=vcf_models,
             do_train=do_train,
             no_trained=no_trained,
             verbose=verbose,

@@ -27,6 +27,14 @@ echo "Checking out pinned commit: $OPENZL_COMMIT"
 git checkout -q "$OPENZL_COMMIT"
 echo "OpenZL HEAD: $(git rev-parse HEAD)"
 
+# --- 1b) Apply patches (wide-CSV limits for VCF support) --------------------
+PATCH_SCRIPT="$NYX_ROOT/scripts/patch_openzl.sh"
+if [ -x "$PATCH_SCRIPT" ]; then
+  echo ""
+  echo "Applying OpenZL patches..."
+  bash "$PATCH_SCRIPT"
+fi
+
 # --- 2) Build OpenZL (produces zli) ----------------------------------------
 echo ""
 echo "Building OpenZL..."
