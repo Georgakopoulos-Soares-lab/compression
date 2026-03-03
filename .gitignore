@@ -22,3 +22,4 @@
 # OS / editor
 .DS_Store
 *.swp
+json_test/experiments/citylots/citylots.json
