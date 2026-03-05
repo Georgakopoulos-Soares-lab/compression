@@ -12,13 +12,19 @@ etc.).  Key differences from the generic codec:
   the trained compressor.  Per-file metadata is reduced to a compact binary
   manifest (~KB instead of ~MB).
 
+  P3 — Performance: parallel JSONL parsing via multiprocessing, overlapped
+  encode/compress via on_tsv_ready callback, compact manifest without
+  redundant start_idx.
+
 Meta version: 5.
 """
 
 import json
+import multiprocessing
+import os
 import struct
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 class TelemetryCodecError(Exception):
@@ -203,7 +209,7 @@ def load_schema(path: Path) -> dict:
 # Manifest: compact binary per-file routing data
 # ---------------------------------------------------------------------------
 #
-# Format:
+# Format (v2 — no start_idx, reconstructed from per-type running counters):
 #   [4 bytes]  U32LE  source_lines (total lines in original JSONL)
 #   [1 byte]   U8     num_types_present
 #   For each type present (sorted by type name):
@@ -213,7 +219,6 @@ def load_schema(path: Path) -> dict:
 #     [4 bytes]  U32LE  num_runs
 #     For each run:
 #       [1 byte]   U8     type_index (0xFF = __blank__)
-#       [4 bytes]  U32LE  start_idx
 #       [4 bytes]  U32LE  count
 # ---------------------------------------------------------------------------
 
@@ -240,15 +245,14 @@ def build_manifest(
         rc = meta_types[type_name]["record_count"]
         buf += struct.pack("<BI", tidx, rc)
 
-    # line_order RLE (binary)
+    # line_order RLE (binary) — no start_idx, just type + count
     buf += struct.pack("<I", len(line_order_rle))
-    for entry in line_order_rle:
-        type_name, start_idx, count = entry[0], entry[1], entry[2]
+    for type_name, count in line_order_rle:
         if type_name == "__blank__":
             tidx = _BLANK_TYPE_IDX
         else:
             tidx = type_index[type_name]
-        buf += struct.pack("<BII", tidx, start_idx, count)
+        buf += struct.pack("<BI", tidx, count)
 
     return bytes(buf)
 
@@ -279,53 +283,85 @@ def parse_manifest(
     num_runs = struct.unpack_from("<I", data, off)[0]
     off += 4
 
+    # Reconstruct line_order with per-type running counters
+    type_counters: Dict[str, int] = {}
     line_order: List[Tuple[str, int]] = []
     for _ in range(num_runs):
-        tidx, start_idx, count = struct.unpack_from("<BII", data, off)
-        off += 9
+        tidx, count = struct.unpack_from("<BI", data, off)
+        off += 5
         if tidx == _BLANK_TYPE_IDX:
             type_name = "__blank__"
         else:
             type_name = index_to_type[tidx]
+        start_idx = type_counters.get(type_name, 0)
         for i in range(count):
             line_order.append((type_name, start_idx + i))
+        type_counters[type_name] = start_idx + count
 
     return source_lines, record_counts, line_order
 
 
 # ---------------------------------------------------------------------------
-# Encode (optimized for telemetry)
+# Parallel JSONL parsing (P3c)
 # ---------------------------------------------------------------------------
 
-def encode(
-    input_file: Path,
-    output_dir: Path,
-    schema: Optional[dict] = None,
-    verbose: bool = False,
-) -> Tuple[List[Path], Path, dict]:
-    """Encode a telemetry JSONL file into optimized type-grouped TSVs.
+def _find_chunk_boundaries(file_path: Path, num_chunks: int) -> List[int]:
+    """Find byte offsets that split the file into ~equal chunks at newline
+    boundaries.  Returns num_chunks+1 offsets (first is 0, last is file size).
+    """
+    file_size = file_path.stat().st_size
+    if file_size == 0 or num_chunks <= 1:
+        return [0, file_size]
 
-    If *schema* is provided, writes a compact binary manifest.bin instead of
-    the full meta.json.  The schema is also embedded as schema.json in the
-    output for self-contained decompression.
+    chunk_size = file_size // num_chunks
+    boundaries = [0]
 
-    If *schema* is None (first run / training), writes a full meta.json (v4
-    format) and returns the meta_types dict so the caller can extract a schema.
+    with open(file_path, "rb") as f:
+        for i in range(1, num_chunks):
+            target = chunk_size * i
+            f.seek(target)
+            # Read ahead to find the next newline
+            remainder = f.read(8192)
+            nl_pos = remainder.find(b"\n")
+            if nl_pos == -1:
+                # No newline found — skip this boundary
+                continue
+            boundary = target + nl_pos + 1
+            if boundary < file_size and boundary > boundaries[-1]:
+                boundaries.append(boundary)
+
+    boundaries.append(file_size)
+    return boundaries
+
+
+def _parse_chunk(args):
+    """Parse a chunk of the JSONL file.  Called in a worker process.
 
     Returns:
-        Tuple of (list of TSV paths, manifest_or_meta path, meta_types dict).
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
+        (type_records, type_columns, type_col_index, type_field_orders,
+         line_order, line_count)
 
-    type_records: Dict[str, List[List[str]]] = {}
-    type_columns: Dict[str, List[str]] = {}
-    type_col_index: Dict[str, Dict[str, int]] = {}
-    line_order: List[Tuple[str, int]] = []
-    type_field_orders: Dict[str, List[str]] = {}
+    All values are plain Python structures (no Path objects) for pickling.
+    """
+    file_path, start_offset, end_offset = args
+
+    type_records = {}
+    type_columns = {}
+    type_col_index = {}
+    type_field_orders = {}
+    line_order = []  # list of (type_name, idx_within_type)
 
     line_num = 0
-    with open(input_file, "r", encoding="utf-8") as f:
-        for raw_line in f:
+    with open(file_path, "r", encoding="utf-8") as f:
+        if start_offset > 0:
+            f.seek(start_offset)
+        while True:
+            if end_offset > 0 and f.tell() >= end_offset:
+                break
+            raw_line = f.readline()
+            if not raw_line:
+                break
+
             stripped = raw_line.rstrip("\n").rstrip("\r")
             if not stripped:
                 line_order.append(("__blank__", 0))
@@ -333,9 +369,8 @@ def encode(
 
             top, _, top_keys = _parse_object_raw(stripped)
             if not top:
-                raise TelemetryCodecError(
-                    f"Failed to parse JSON at line {line_num + 1}"
-                )
+                line_order.append(("__blank__", 0))
+                continue
 
             type_raw = top.get("type", '"__notype__"')
             if type_raw.startswith('"'):
@@ -343,12 +378,10 @@ def encode(
             else:
                 record_type = type_raw
 
-            row_dict: Dict[str, str] = {}
+            row_dict = {}
 
             for k in top_keys:
-                if k == "type":
-                    continue
-                if k == "content":
+                if k == "type" or k == "content":
                     continue
                 if k in _ENVELOPE_FIELDS_SET:
                     row_dict[k] = top[k]
@@ -356,7 +389,7 @@ def encode(
                     row_dict[f"e.{k}"] = top[k]
 
             content_raw = top.get("content")
-            content_keys: List[str] = []
+            content_keys = []
             if content_raw is not None:
                 if content_raw.startswith("{"):
                     content_obj, _, content_keys = _parse_object_raw(content_raw)
@@ -366,7 +399,6 @@ def encode(
                     row_dict["c.__raw__"] = content_raw
                     content_keys = ["__raw__"]
 
-            # Store __ckeys__ during accumulation (optimized later before write)
             row_dict["__ckeys__"] = _CKEYS_SEP.join(content_keys)
 
             if record_type not in type_columns:
@@ -392,6 +424,134 @@ def encode(
             type_records[record_type].append(row)
             line_order.append((record_type, idx))
             line_num += 1
+
+    return (type_records, type_columns, type_col_index,
+            type_field_orders, line_order, line_num)
+
+
+def _merge_chunks(chunk_results):
+    """Merge results from parallel chunk parsing into unified structures."""
+    merged_records = {}
+    merged_columns = {}
+    merged_col_index = {}
+    merged_field_orders = {}
+    merged_line_order = []
+    total_lines = 0
+
+    for (type_records, type_columns, type_col_index,
+         type_field_orders, line_order, line_count) in chunk_results:
+
+        # Track per-type offset for this chunk (records already in merged)
+        type_offset = {t: len(merged_records.get(t, [])) for t in type_records}
+
+        for record_type in type_records:
+            if record_type not in merged_columns:
+                # First time seeing this type — adopt columns directly
+                merged_columns[record_type] = list(type_columns[record_type])
+                merged_col_index[record_type] = {
+                    c: i for i, c in enumerate(merged_columns[record_type])
+                }
+                merged_records[record_type] = []
+                merged_field_orders[record_type] = type_field_orders[record_type]
+
+            # Merge column sets: the chunk may have discovered new columns
+            mcols = merged_columns[record_type]
+            mcol_idx = merged_col_index[record_type]
+            chunk_cols = type_columns[record_type]
+
+            # Build mapping from chunk column positions to merged positions
+            col_mapping = []
+            for i, c in enumerate(chunk_cols):
+                if c not in mcol_idx:
+                    mcol_idx[c] = len(mcols)
+                    mcols.append(c)
+                col_mapping.append(mcol_idx[c])
+
+            # Remap and append rows
+            merged_ncols = len(mcols)
+            for chunk_row in type_records[record_type]:
+                new_row = [""] * merged_ncols
+                for i, val in enumerate(chunk_row):
+                    if i < len(col_mapping):
+                        new_row[col_mapping[i]] = val
+                merged_records[record_type].append(new_row)
+
+        # Remap line_order indices to merged offsets
+        for entry_type, entry_idx in line_order:
+            if entry_type == "__blank__":
+                merged_line_order.append(("__blank__", 0))
+            else:
+                merged_line_order.append(
+                    (entry_type, type_offset[entry_type] + entry_idx))
+
+        total_lines += line_count
+
+    return (merged_records, merged_columns, merged_col_index,
+            merged_field_orders, merged_line_order, total_lines)
+
+
+# ---------------------------------------------------------------------------
+# Encode (optimized for telemetry)
+# ---------------------------------------------------------------------------
+
+def encode(
+    input_file: Path,
+    output_dir: Path,
+    schema: Optional[dict] = None,
+    verbose: bool = False,
+    on_tsv_ready: Optional[Callable[[Path], None]] = None,
+    num_workers: int = 0,
+) -> Tuple[List[Path], Path, dict]:
+    """Encode a telemetry JSONL file into optimized type-grouped TSVs.
+
+    If *schema* is provided, writes a compact binary manifest.bin instead of
+    the full meta.json.  The schema is also embedded as schema.json in the
+    output for self-contained decompression.
+
+    If *schema* is None (first run / training), writes a full meta.json (v4
+    format) and returns the meta_types dict so the caller can extract a schema.
+
+    *on_tsv_ready* is called with each TSV path as soon as it is written,
+    allowing the caller to start compressing in parallel with remaining
+    TSV writes.
+
+    *num_workers* controls parallel parsing.  0 = auto-detect CPU count.
+    1 = single-process (no multiprocessing overhead).
+
+    Returns:
+        Tuple of (list of TSV paths, manifest_or_meta path, meta_types dict).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Decide parallelism
+    if num_workers == 0:
+        num_workers = max(1, (os.cpu_count() or 1))
+    file_size = input_file.stat().st_size
+    # Only use multiprocessing for files > 10 MB with > 1 worker
+    use_parallel = num_workers > 1 and file_size > 10 * 1024 * 1024
+
+    if use_parallel:
+        boundaries = _find_chunk_boundaries(input_file, num_workers)
+        actual_chunks = len(boundaries) - 1
+        if actual_chunks <= 1:
+            use_parallel = False
+
+    if use_parallel:
+        # Parallel parsing
+        chunk_args = [
+            (str(input_file), boundaries[i], boundaries[i + 1])
+            for i in range(actual_chunks)
+        ]
+        with multiprocessing.Pool(processes=actual_chunks) as pool:
+            chunk_results = pool.map(_parse_chunk, chunk_args)
+
+        (type_records, type_columns, type_col_index,
+         type_field_orders, line_order, line_num) = _merge_chunks(chunk_results)
+    else:
+        # Single-process parsing (small files or 1 worker)
+        result = _parse_chunk((str(input_file), 0, 0))
+        (type_records, type_columns, type_col_index,
+         type_field_orders, line_order, line_num) = result
 
     # --- Post-processing: optimize before writing ---
     meta_types = {}
@@ -459,7 +619,11 @@ def encode(
                 f"{len(records)} records -> {tsv_path.name}"
             )
 
-    # Compact line ordering (RLE)
+        # P3a: notify caller that this TSV is ready for compression
+        if on_tsv_ready is not None:
+            on_tsv_ready(tsv_path)
+
+    # Compact line ordering (RLE) — type + count only, no start_idx
     compact_order = _rle_encode(line_order)
 
     # Decide output format based on whether schema is provided
@@ -704,30 +868,49 @@ def _rebuild_content(
 
 
 # ---------------------------------------------------------------------------
-# RLE utilities (same as jsonl_codec)
+# RLE utilities — compact: (type, count) only, no start_idx
 # ---------------------------------------------------------------------------
 
 def _rle_encode(line_order: List[Tuple[str, int]]) -> List:
+    """RLE encode line_order into (type, count) runs.
+
+    The start_idx is implicit — during decode, per-type running counters
+    reconstruct it.
+    """
     if not line_order:
         return []
     result = []
-    cur_type, cur_start = line_order[0]
+    cur_type = line_order[0][0]
     count = 1
     for i in range(1, len(line_order)):
-        t, idx = line_order[i]
-        if t == cur_type and idx == cur_start + count:
+        t = line_order[i][0]
+        if t == cur_type:
             count += 1
         else:
-            result.append([cur_type, cur_start, count])
-            cur_type, cur_start = t, idx
+            result.append((cur_type, count))
+            cur_type = t
             count = 1
-    result.append([cur_type, cur_start, count])
+    result.append((cur_type, count))
     return result
 
 
 def _rle_decode(compact_order: List) -> List[Tuple[str, int]]:
+    """Decode RLE line_order.  Handles both v4 (type, start, count) and
+    v5 (type, count) formats.
+    """
     result = []
-    for record_type, start_idx, count in compact_order:
-        for i in range(count):
-            result.append((record_type, start_idx + i))
+    type_counters: Dict[str, int] = {}
+    for entry in compact_order:
+        if len(entry) == 3:
+            # v4 format: [type, start_idx, count]
+            record_type, start_idx, count = entry
+            for i in range(count):
+                result.append((record_type, start_idx + i))
+        else:
+            # v5 format: (type, count)
+            record_type, count = entry
+            start_idx = type_counters.get(record_type, 0)
+            for i in range(count):
+                result.append((record_type, start_idx + i))
+            type_counters[record_type] = start_idx + count
     return result

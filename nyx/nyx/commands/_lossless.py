@@ -1894,6 +1894,7 @@ def compress_telemetry(
 ):
     """Telemetry JSONL compression via optimized TSV decomposition + OpenZL CSV."""
     input_size = input_path.stat().st_size
+    num_cpus = os.cpu_count() or 4
 
     click.echo(f"Input:  {input_path.name} ({input_size:,} bytes)")
 
@@ -1913,9 +1914,11 @@ def compress_telemetry(
 
         # Step 1: Encode with telemetry codec
         step1_label = "[1/4]" if do_train else "[1/3]"
-        click.echo(f"  {step1_label} Encoding JSONL into optimized type-grouped TSVs...")
+        click.echo(f"  {step1_label} Encoding JSONL into optimized type-grouped TSVs "
+                   f"({num_cpus} CPUs)...")
         tsv_paths, routing_path, meta_types = telemetry_codec.encode(
-            input_path, tsv_dir, schema=schema, verbose=verbose)
+            input_path, tsv_dir, schema=schema, verbose=verbose,
+            num_workers=num_cpus)
 
         total_tsv_size = sum(f.stat().st_size for f in tsv_paths)
         routing_size = routing_path.stat().st_size
@@ -2064,7 +2067,8 @@ def compress_telemetry(
             # v4 fallback (training run): meta.json
             routing_files.append(routing_path)
 
-        num_workers = min(compress_jobs, len(tsv_paths) + len(routing_files))
+        effective_jobs = compress_jobs if compress_jobs > 0 else num_cpus
+        num_workers = min(effective_jobs, len(tsv_paths) + len(routing_files))
         total_orig = 0
         total_comp = 0
         entries = {}
