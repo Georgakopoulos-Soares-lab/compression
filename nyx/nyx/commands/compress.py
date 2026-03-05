@@ -26,10 +26,12 @@ from ._lossless import (
     compress_csv_fastq,
     compress_vcf,
     compress_jsonl,
+    compress_telemetry,
     DEFAULT_FASTA_MODELS_DIR,
     DEFAULT_CSV_MODELS_DIR,
     DEFAULT_VCF_MODELS_DIR,
     DEFAULT_JSONL_MODELS_DIR,
+    DEFAULT_TELEMETRY_MODELS_DIR,
 )
 
 
@@ -38,7 +40,7 @@ from ._lossless import (
 @click.option("-o", "--output", "output_file", type=click.Path(),
               default=None, help="Output file path (auto-determined by pipeline).")
 @click.option("-t", "--type", "filetype",
-              type=click.Choice(["auto", "fasta", "protein", "fastq", "vcf", "jsonl", "generic"]),
+              type=click.Choice(["auto", "fasta", "protein", "fastq", "vcf", "jsonl", "telemetry", "generic"]),
               default="auto",
               help="File type (default: auto-detect). Use 'protein' for protein FASTA.")
 @click.option("--mode",
@@ -162,6 +164,8 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
         detected = detect_filetype(input_path)
     elif filetype == "protein":
         detected = "fasta"
+    elif filetype == "telemetry":
+        detected = "telemetry"
     elif filetype == "generic":
         detected = None
     else:
@@ -177,7 +181,7 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
 
     # --- Auto-select mode ---
     if mode == "auto":
-        if detected in ("fasta", "fastq", "vcf", "jsonl"):
+        if detected in ("fasta", "fastq", "vcf", "jsonl", "telemetry"):
             mode = "lossless"
         elif genomic:
             cfg = SCHEMA_REGISTRY.get(detected)
@@ -189,7 +193,7 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
             mode = "generic"
 
     # --- Validate mode + options ---
-    if mode == "lossless" and detected not in ("fasta", "fastq", "vcf", "jsonl"):
+    if mode == "lossless" and detected not in ("fasta", "fastq", "vcf", "jsonl", "telemetry"):
         raise click.UsageError(
             f"Lossless mode requires FASTA, FASTQ, VCF, or JSONL input, "
             f"but detected: {detected or 'unknown'}. "
@@ -223,6 +227,8 @@ def compress_cmd(input_file, output_file, filetype, mode, do_train, models_dir,
         elif mode == "lossless" and detected == "vcf":
             output_path = input_path.parent / (input_path.name + ".zlvcf")
         elif mode == "lossless" and detected == "jsonl":
+            output_path = input_path.parent / (input_path.name + ".zljsonl")
+        elif mode == "lossless" and detected == "telemetry":
             output_path = input_path.parent / (input_path.name + ".zljsonl")
         else:
             output_path = input_path.parent / (input_path.name + ".nyx")
@@ -403,6 +409,22 @@ def _run_lossless(input_path, output_path, detected, filetype, do_train,
             input_path=input_path,
             output_path=output_path,
             models_dir=vcf_models,
+            do_train=do_train,
+            no_trained=no_trained,
+            verbose=verbose,
+            train_threads=train_threads,
+            max_time_secs=max_time_secs,
+            train_sample_bytes=train_sample_bytes,
+            compress_jobs=compress_jobs,
+            group_train_dir=group_train,
+        )
+    elif detected == "telemetry":
+        click.echo(f"Compressing {input_path.name} (lossless telemetry JSONL)")
+        tel_models = Path(models_dir) if models_dir else DEFAULT_TELEMETRY_MODELS_DIR
+        compress_telemetry(
+            input_path=input_path,
+            output_path=output_path,
+            models_dir=tel_models,
             do_train=do_train,
             no_trained=no_trained,
             verbose=verbose,

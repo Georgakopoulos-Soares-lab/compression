@@ -6,6 +6,7 @@ of its own.
 """
 
 import concurrent.futures
+import json
 import os
 import re
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import click
 
-from ..core import codec, fastq_codec, jsonl_codec, openzl, vcf_codec
+from ..core import codec, fastq_codec, jsonl_codec, openzl, telemetry_codec, vcf_codec
 from ..core.zlfasta import create_zlfasta, extract_zlfasta
 from ..core.zlfastq import create_zlfastq, extract_zlfastq
 from ..core.zljsonl import create_zljsonl, extract_zljsonl
@@ -62,6 +63,7 @@ DEFAULT_FASTA_MODELS_DIR = _NYX_ROOT / "models" / "lossless"
 DEFAULT_CSV_MODELS_DIR = _NYX_ROOT / "models" / "lossless_fastq_csv"
 DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 DEFAULT_JSONL_MODELS_DIR = _NYX_ROOT / "models" / "lossless_jsonl"
+DEFAULT_TELEMETRY_MODELS_DIR = _NYX_ROOT / "models" / "lossless_telemetry"
 DEFAULT_VCF_MODELS_DIR = _NYX_ROOT / "models" / "lossless_vcf"
 
 # Compressor filenames
@@ -70,6 +72,8 @@ _PROTEIN_FASTA_COMPRESSOR = "protein_fasta.zl_compressor"
 _CSV_COMPRESSOR = "fastq_csv.zl_compressor"
 _VCF_COMPRESSOR = "vcf_csv.zl_compressor"
 _JSONL_COMPRESSOR = "jsonl_csv.zl_compressor"
+_TELEMETRY_COMPRESSOR = "telemetry_csv.zl_compressor"
+_TELEMETRY_SCHEMA = "telemetry_schema.json"
 _VCF_COMPRESSOR = "vcf_csv.zl_compressor"
 
 # File extensions for group training
@@ -1662,13 +1666,14 @@ def compress_jsonl(
                 click.echo(f"    Training on {len(tsv_paths)} type TSV(s): "
                            f"{total_sample_size:,} bytes")
 
-            # Use serial profile for training (csv profile triggers an OpenZL
-            # assertion in encode_frameheader.c with high-cardinality string
-            # columns).  The trained compressor still compresses TSVs well.
+            # CSV profile with tab delimiter for training — gives ~1.7x better
+            # compression than serial on type-grouped TSVs.  (The old serial
+            # workaround was needed before the 2048→4096 input-limit patch.)
             openzl.train(
                 sample_dir=training_dir,
                 output_file=compressor_path,
-                profile="serial",
+                profile="csv",
+                profile_arg="\t",
                 use_all_samples=True,
                 no_ace_successors=True,
                 threads=train_threads,
@@ -1716,6 +1721,7 @@ def compress_jsonl(
 
         def _compress_tsv_part(part_path, comp_path):
             compressed_file = compressed_dir / (part_path.name + ".zl")
+            t_start = time.time()
             if comp_path and Path(comp_path).is_file():
                 try:
                     openzl.compress(
@@ -1723,18 +1729,20 @@ def compress_jsonl(
                         compressor=comp_path,
                         force=True, verbose=verbose,
                     )
-                    return part_path.name, compressed_file, "trained"
+                    return part_path.name, compressed_file, "trained", time.time() - t_start
                 except openzl.OpenZLError:
                     click.echo(f"    Warning: trained compressor failed for "
                                f"{part_path.name}, falling back to csv profile")
+                    t_start = time.time()
             openzl.compress(
                 part_path, compressed_file,
                 profile="csv",
                 profile_arg="\t",
                 force=True, verbose=verbose,
             )
-            return part_path.name, compressed_file, "csv"
+            return part_path.name, compressed_file, "csv", time.time() - t_start
 
+        compress_t0 = time.time()
         num_workers = min(compress_jobs, len(tsv_paths))
         total_orig = 0
         total_comp = 0
@@ -1744,7 +1752,7 @@ def compress_jsonl(
                 for p in tsv_paths
             }
             for fut in concurrent.futures.as_completed(futures):
-                name, compressed_file, mode = fut.result()
+                name, compressed_file, mode, dt = fut.result()
                 orig_size = futures[fut].stat().st_size
                 compressed_data = compressed_file.read_bytes()
                 entries[name] = (compressed_data, orig_size)
@@ -1752,12 +1760,16 @@ def compress_jsonl(
                 total_comp += len(compressed_data)
                 if verbose:
                     ratio = orig_size / len(compressed_data) if compressed_data else 0
+                    mbps = (orig_size / 1024 / 1024) / dt if dt > 0 else 0
                     click.echo(f"    {name}: {orig_size:,} -> "
-                               f"{len(compressed_data):,} ({ratio:.2f}x) [{mode}]")
+                               f"{len(compressed_data):,} ({ratio:.2f}x) "
+                               f"[{mode}] {mbps:.1f} MB/s")
 
+        compress_elapsed = time.time() - compress_t0
         if total_comp > 0:
+            tsv_mbps = (total_orig / 1024 / 1024) / compress_elapsed if compress_elapsed > 0 else 0
             click.echo(f"    TSV total: {total_orig:,} -> {total_comp:,} "
-                       f"({total_orig / total_comp:.2f}x)")
+                       f"({total_orig / total_comp:.2f}x) {tsv_mbps:.1f} MB/s")
 
         # Step 4: Bundle into .zljsonl container
         step_label = "[4/4]" if do_train else "[3/3]"
@@ -1767,12 +1779,13 @@ def compress_jsonl(
         elapsed = time.time() - t0
         output_size = output_path.stat().st_size
         ratio = input_size / output_size if output_size > 0 else 0
+        total_mbps = (input_size / 1024 / 1024) / elapsed if elapsed > 0 else 0
 
         click.echo(
             f"\nOutput: {output_path.name} ({output_size:,} bytes)\n"
             f"Ratio:  {ratio:.3f}x  "
             f"(saved {(1 - output_size / input_size) * 100:.1f}%)\n"
-            f"Time:   {elapsed:.1f}s"
+            f"Time:   {elapsed:.1f}s ({total_mbps:.1f} MB/s end-to-end)"
         )
 
     finally:
@@ -1829,8 +1842,26 @@ def decompress_lossless_jsonl(input_path: Path, output_path: Path,
                 click.echo(f"    {p.name}: {p.stat().st_size:,} bytes")
 
         # Step 3: Decode TSVs back to JSONL
-        click.echo("  [3/3] Reconstructing JSONL from type-grouped TSVs...")
-        jsonl_codec.decode(tsv_dir, output_path, verbose=verbose)
+        # Auto-detect format: v5 (schema+manifest), v4 (meta.json telemetry), v3 (generic)
+        dec_schema_path = tsv_dir / "schema.json"
+        dec_manifest_path = tsv_dir / "manifest.bin"
+        dec_meta_path = tsv_dir / "meta.json"
+
+        if dec_schema_path.exists() and dec_manifest_path.exists():
+            click.echo("  [3/3] Reconstructing JSONL (telemetry codec v5)...")
+            telemetry_codec.decode(tsv_dir, output_path, verbose=verbose)
+        elif dec_meta_path.exists():
+            with open(dec_meta_path, "r") as mf:
+                dec_meta = json.load(mf)
+            if dec_meta.get("version") == 4 or dec_meta.get("codec") == "telemetry":
+                click.echo("  [3/3] Reconstructing JSONL (telemetry codec v4)...")
+                telemetry_codec.decode(tsv_dir, output_path, verbose=verbose)
+            else:
+                click.echo("  [3/3] Reconstructing JSONL from type-grouped TSVs...")
+                jsonl_codec.decode(tsv_dir, output_path, verbose=verbose)
+        else:
+            click.echo("  [3/3] Reconstructing JSONL from type-grouped TSVs...")
+            jsonl_codec.decode(tsv_dir, output_path, verbose=verbose)
 
         elapsed = time.time() - t0
         output_size = output_path.stat().st_size
@@ -1838,6 +1869,251 @@ def decompress_lossless_jsonl(input_path: Path, output_path: Path,
         click.echo(
             f"\nOutput: {output_path.name} ({output_size:,} bytes)\n"
             f"Time:   {elapsed:.1f}s"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry Compress: optimized type-grouped TSV + OpenZL CSV profile
+# ---------------------------------------------------------------------------
+
+def compress_telemetry(
+    input_path: Path,
+    output_path: Path,
+    models_dir: Path,
+    do_train: bool,
+    no_trained: bool,
+    verbose: bool,
+    train_threads: int,
+    max_time_secs: int,
+    train_sample_bytes: int,
+    compress_jobs: int,
+    group_train_dir: str = None,
+):
+    """Telemetry JSONL compression via optimized TSV decomposition + OpenZL CSV."""
+    input_size = input_path.stat().st_size
+
+    click.echo(f"Input:  {input_path.name} ({input_size:,} bytes)")
+
+    t0 = time.time()
+    tmpdir = tempfile.mkdtemp(prefix="nyx_telemetry_")
+
+    try:
+        tsv_dir = Path(tmpdir) / "tsv"
+        compressed_dir = Path(tmpdir) / "compressed"
+        compressed_dir.mkdir()
+
+        # Load schema if available (saved during training)
+        schema_path = models_dir / _TELEMETRY_SCHEMA
+        schema = None
+        if not do_train and schema_path.is_file():
+            schema = telemetry_codec.load_schema(schema_path)
+
+        # Step 1: Encode with telemetry codec
+        step1_label = "[1/4]" if do_train else "[1/3]"
+        click.echo(f"  {step1_label} Encoding JSONL into optimized type-grouped TSVs...")
+        tsv_paths, routing_path, meta_types = telemetry_codec.encode(
+            input_path, tsv_dir, schema=schema, verbose=verbose)
+
+        total_tsv_size = sum(f.stat().st_size for f in tsv_paths)
+        routing_size = routing_path.stat().st_size
+        routing_label = "manifest" if schema else "meta"
+        click.echo(f"    {len(tsv_paths)} type TSV(s), "
+                   f"{total_tsv_size:,} bytes TSV + {routing_size:,} bytes {routing_label}")
+        if verbose:
+            for f in tsv_paths:
+                click.echo(f"    {f.name}: {f.stat().st_size:,} bytes")
+
+        # Step 2: Train or load compressor
+        compressor_path = models_dir / _TELEMETRY_COMPRESSOR
+        if do_train:
+            models_dir.mkdir(parents=True, exist_ok=True)
+            training_dir = Path(tmpdir) / "training"
+            training_dir.mkdir()
+
+            if group_train_dir:
+                group_path = Path(group_train_dir).resolve()
+                jsonl_files = sorted(
+                    f for f in group_path.iterdir()
+                    if f.is_file() and f.suffix.lower() in _JSONL_EXTENSIONS
+                )
+                if not jsonl_files:
+                    raise click.ClickException(
+                        f"No JSONL files found in {group_path}")
+                click.echo(f"  [2/4] Group training from {len(jsonl_files)} JSONL file(s)...")
+
+                total_train_size = 0
+                for idx, jl_file in enumerate(jsonl_files):
+                    sample_tmp = Path(tmpdir) / f"group_{idx:03d}"
+                    try:
+                        sample_tsvs, _, _ = telemetry_codec.encode(
+                            jl_file, sample_tmp, verbose=False)
+                    except Exception as e:
+                        click.echo(f"    Warning: skipping {jl_file.name}: {e}")
+                        continue
+                    for sf in sample_tsvs:
+                        sz = sf.stat().st_size
+                        dest = training_dir / f"sample_{idx:03d}_{sf.name}"
+                        if sz > train_sample_bytes:
+                            sz = _truncate_tsv_at_newline(sf, dest, train_sample_bytes)
+                        else:
+                            shutil.copy2(sf, dest)
+                        total_train_size += sz
+                    shutil.rmtree(sample_tmp, ignore_errors=True)
+
+                input_in_group = any(
+                    f.resolve() == input_path for f in jsonl_files)
+                if not input_in_group:
+                    for sf in tsv_paths:
+                        dest = training_dir / f"sample_{len(jsonl_files):03d}_{sf.name}"
+                        shutil.copy2(sf, dest)
+                        total_train_size += sf.stat().st_size
+
+                num_samples = len(list(training_dir.iterdir()))
+                click.echo(f"    {num_samples} samples, "
+                           f"total {total_train_size:,} bytes")
+            else:
+                click.echo(f"  [2/4] Training CSV compressor on type TSVs...")
+                total_sample_size = 0
+                for sf in tsv_paths:
+                    sz = sf.stat().st_size
+                    if sz > train_sample_bytes:
+                        dest = training_dir / sf.name
+                        sz = _truncate_tsv_at_newline(sf, dest, train_sample_bytes)
+                    else:
+                        shutil.copy2(sf, training_dir / sf.name)
+                    total_sample_size += sz
+                click.echo(f"    Training on {len(tsv_paths)} type TSV(s): "
+                           f"{total_sample_size:,} bytes")
+
+            # A3: CSV profile with ACE successors enabled (better compressor)
+            openzl.train(
+                sample_dir=training_dir,
+                output_file=compressor_path,
+                profile="csv",
+                profile_arg="\t",
+                use_all_samples=True,
+                no_ace_successors=False,
+                threads=train_threads,
+                max_time_secs=max_time_secs,
+                force=True,
+                verbose=verbose,
+            )
+
+            train_elapsed = time.time() - t0
+            if compressor_path.is_file() and compressor_path.stat().st_size > 0:
+                click.echo(f"    Trained compressor: {compressor_path.stat().st_size:,} bytes "
+                           f"in {train_elapsed:.1f}s")
+                click.echo(f"    Saved to: {compressor_path}")
+            else:
+                click.echo("    Warning: training produced no output, falling back to csv profile")
+                compressor_path = None
+
+            # Extract and save static schema for future compression runs
+            schema = telemetry_codec.extract_schema(meta_types)
+            telemetry_codec.save_schema(schema, schema_path)
+            click.echo(f"    Saved schema: {schema_path} "
+                       f"({schema_path.stat().st_size:,} bytes)")
+        elif not no_trained:
+            if compressor_path.is_file() and compressor_path.stat().st_size > 0:
+                click.echo(f"  Using trained telemetry compressor: {compressor_path}")
+            else:
+                compressor_path = None
+        else:
+            compressor_path = None
+
+        # Step 3: Compress TSVs + meta with OpenZL (A4: all in parallel)
+        step_label = "[3/4]" if do_train else "[2/3]"
+        click.echo(f"  {step_label} Compressing with OpenZL CSV profile...")
+
+        def _compress_part(part_path, comp_path, profile=None, profile_arg=None):
+            compressed_file = compressed_dir / (part_path.name + ".zl")
+            t_start = time.time()
+            if comp_path and Path(comp_path).is_file():
+                try:
+                    openzl.compress(
+                        part_path, compressed_file,
+                        compressor=comp_path,
+                        force=True, verbose=verbose,
+                    )
+                    return part_path.name, compressed_file, "trained", time.time() - t_start
+                except openzl.OpenZLError:
+                    click.echo(f"    Warning: trained compressor failed for "
+                               f"{part_path.name}, falling back")
+                    t_start = time.time()
+            openzl.compress(
+                part_path, compressed_file,
+                profile=profile or "csv",
+                profile_arg=profile_arg or "\t",
+                force=True, verbose=verbose,
+            )
+            return part_path.name, compressed_file, profile or "csv", time.time() - t_start
+
+        # A4: TSVs + routing files compressed in parallel
+        compress_t0 = time.time()
+        # Collect routing files (manifest.bin + schema.json, or meta.json)
+        routing_files = []
+        if schema:
+            # v5: manifest.bin + schema.json (both small, serial profile)
+            routing_files.append(routing_path)  # manifest.bin
+            schema_in_container = tsv_dir / "schema.json"
+            routing_files.append(schema_in_container)
+        else:
+            # v4 fallback (training run): meta.json
+            routing_files.append(routing_path)
+
+        num_workers = min(compress_jobs, len(tsv_paths) + len(routing_files))
+        total_orig = 0
+        total_comp = 0
+        entries = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {}
+            for p in tsv_paths:
+                futures[executor.submit(_compress_part, p, compressor_path)] = p
+            # Routing files use serial profile, no trained compressor
+            for rf in routing_files:
+                futures[executor.submit(
+                    _compress_part, rf, None, "serial", None)] = rf
+
+            for fut in concurrent.futures.as_completed(futures):
+                name, compressed_file, mode, dt = fut.result()
+                source_path = futures[fut]
+                orig_size = source_path.stat().st_size
+                compressed_data = compressed_file.read_bytes()
+                entries[name] = (compressed_data, orig_size)
+                total_orig += orig_size
+                total_comp += len(compressed_data)
+                if verbose:
+                    ratio = orig_size / len(compressed_data) if compressed_data else 0
+                    mbps = (orig_size / 1024 / 1024) / dt if dt > 0 else 0
+                    click.echo(f"    {name}: {orig_size:,} -> "
+                               f"{len(compressed_data):,} ({ratio:.2f}x) "
+                               f"[{mode}] {mbps:.1f} MB/s")
+
+        compress_elapsed = time.time() - compress_t0
+        if total_comp > 0:
+            tsv_mbps = (total_orig / 1024 / 1024) / compress_elapsed if compress_elapsed > 0 else 0
+            click.echo(f"    Total: {total_orig:,} -> {total_comp:,} "
+                       f"({total_orig / total_comp:.2f}x) {tsv_mbps:.1f} MB/s")
+
+        # Step 4: Bundle into .zljsonl container
+        step_label = "[4/4]" if do_train else "[3/3]"
+        click.echo(f"  {step_label} Creating .zljsonl container...")
+        create_zljsonl(output_path, entries)
+
+        elapsed = time.time() - t0
+        output_size = output_path.stat().st_size
+        ratio = input_size / output_size if output_size > 0 else 0
+        total_mbps = (input_size / 1024 / 1024) / elapsed if elapsed > 0 else 0
+
+        click.echo(
+            f"\nOutput: {output_path.name} ({output_size:,} bytes)\n"
+            f"Ratio:  {ratio:.3f}x  "
+            f"(saved {(1 - output_size / input_size) * 100:.1f}%)\n"
+            f"Time:   {elapsed:.1f}s ({total_mbps:.1f} MB/s end-to-end)"
         )
 
     finally:
