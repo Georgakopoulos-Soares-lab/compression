@@ -2,12 +2,30 @@
 import tempfile, shutil, sys
 from pathlib import Path
 
-def main():
-    from nyx.core import telemetry_codec
 
-    src = Path("../data/openZL-telemetru/nom-telegraf/part-005.jsonl")
+def main():
+    import telemetry_codec
+
+    src = Path("data/openZL-telemetru/nom-telegraf/part-005.jsonl")
+    if not src.exists():
+        # Try alternate paths
+        for alt in [
+            Path("../data/openZL-telemetru/nom-telegraf/part-005.jsonl"),
+            Path("data/openZL-telemetru/nom-telegraf2/part-014.jsonl"),
+            Path("../data/openZL-telemetru/nom-telegraf2/part-014.jsonl"),
+        ]:
+            if alt.exists():
+                src = alt
+                break
+        else:
+            print("No test data found. Provide a JSONL file path as argument.")
+            sys.exit(1)
+
+    if len(sys.argv) > 1:
+        src = Path(sys.argv[1])
+
     schema = telemetry_codec.load_schema(
-        Path("../models/lossless_telemetry/telemetry_schema.json"))
+        Path("models/lossless_telemetry/telemetry_schema.json"))
 
     # Use 50K lines for fast testing
     with open(src) as f:
@@ -50,6 +68,7 @@ def main():
     else:
         print("\nSome tests FAILED!")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

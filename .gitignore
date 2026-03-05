@@ -1,20 +1,15 @@
-# Downloaded genome data
-/data
-/bench_out
+# Data (not deployed)
+/data/
 
-# Nyx build artifacts (compiled inside nyx/)
-/nyx/openzl/
-/nyx/bin/
-/nyx/models2/
-
-# Python packaging
+# Build artifacts
 *.egg-info/
 __pycache__/
 *.pyc
-/nyx/dist/
-/nyx/build/
+build/
+dist/
+*.so
 
 # OS / editor
 .DS_Store
 *.swp
-main_branch/
+.venv/

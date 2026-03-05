@@ -1,8 +1,0 @@
-@iupac_read1 contains IUPAC ambiguity codes
-ACGTRYWSMKHBVDN
-+
-IIIIIIIIIIIIIII
-@iupac_read2 with gap characters
-ACG-T.ACG
-+
-IIIIIIIII

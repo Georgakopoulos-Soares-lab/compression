@@ -1,8 +1,0 @@
->seq1 every other base is N
-ANANTNCNGN
->seq2 random N positions
-ACNGTNCGNTANNCG
->seq3 N at start and end
-NACGTACGTN
->seq4 single N
-ACGTNACGT

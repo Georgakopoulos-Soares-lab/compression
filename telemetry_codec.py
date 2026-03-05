@@ -29,7 +29,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 # Try to import the C extension for fast JSON scanning.
 # Falls back to pure-Python implementation if not available.
 try:
-    from nyx.core._telemetry_scanner import parse_line as _c_parse_line
+    from _telemetry_scanner import parse_line as _c_parse_line
     _HAS_C_SCANNER = True
 except ImportError:
     _HAS_C_SCANNER = False
@@ -366,7 +366,7 @@ def _parse_chunk(args):
 
     # Try to import C scanner in the worker process (needed for multiprocessing)
     try:
-        from nyx.core._telemetry_scanner import parse_line as c_parse_line
+        from _telemetry_scanner import parse_line as c_parse_line
         use_c = True
     except ImportError:
         use_c = False
