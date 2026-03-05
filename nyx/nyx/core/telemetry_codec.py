@@ -26,6 +26,14 @@ import struct
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+# Try to import the C extension for fast JSON scanning.
+# Falls back to pure-Python implementation if not available.
+try:
+    from nyx.core._telemetry_scanner import parse_line as _c_parse_line
+    _HAS_C_SCANNER = True
+except ImportError:
+    _HAS_C_SCANNER = False
+
 
 class TelemetryCodecError(Exception):
     """Raised when telemetry codec encode/decode fails."""
@@ -33,6 +41,7 @@ class TelemetryCodecError(Exception):
 
 # ---------------------------------------------------------------------------
 # Raw JSON scanner — same as jsonl_codec (preserves exact numeric text)
+# Falls back to these when C extension is not available.
 # ---------------------------------------------------------------------------
 
 def _skip_ws(s: str, pos: int) -> int:
@@ -283,9 +292,11 @@ def parse_manifest(
     num_runs = struct.unpack_from("<I", data, off)[0]
     off += 4
 
-    # Reconstruct line_order with per-type running counters
+    # Reconstruct line_order with per-type running counters.
+    # Use extend + range for bulk appends instead of per-item append.
     type_counters: Dict[str, int] = {}
     line_order: List[Tuple[str, int]] = []
+    _extend = line_order.extend
     for _ in range(num_runs):
         tidx, count = struct.unpack_from("<BI", data, off)
         off += 5
@@ -294,8 +305,7 @@ def parse_manifest(
         else:
             type_name = index_to_type[tidx]
         start_idx = type_counters.get(type_name, 0)
-        for i in range(count):
-            line_order.append((type_name, start_idx + i))
+        _extend((type_name, start_idx + i) for i in range(count))
         type_counters[type_name] = start_idx + count
 
     return source_lines, record_counts, line_order
@@ -342,6 +352,7 @@ def _parse_chunk(args):
          line_order, line_count)
 
     All values are plain Python structures (no Path objects) for pickling.
+    Uses the C scanner if available for ~20-50x speedup on the parsing step.
     """
     file_path, start_offset, end_offset = args
 
@@ -352,34 +363,50 @@ def _parse_chunk(args):
     line_order = []  # list of (type_name, idx_within_type)
 
     line_num = 0
-    with open(file_path, "r", encoding="utf-8") as f:
+
+    # Try to import C scanner in the worker process (needed for multiprocessing)
+    try:
+        from nyx.core._telemetry_scanner import parse_line as c_parse_line
+        use_c = True
+    except ImportError:
+        use_c = False
+
+    # Read chunk as bytes, decode once, split keeping newlines
+    with open(file_path, "rb") as f:
         if start_offset > 0:
             f.seek(start_offset)
-        while True:
-            if end_offset > 0 and f.tell() >= end_offset:
-                break
-            raw_line = f.readline()
-            if not raw_line:
-                break
+        chunk_size = (end_offset - start_offset) if end_offset > 0 else 0
+        raw_data = f.read(chunk_size) if chunk_size > 0 else f.read()
 
-            stripped = raw_line.rstrip("\n").rstrip("\r")
+    lines = raw_data.decode("utf-8").splitlines(True)
+    del raw_data
+
+    for raw_line in lines:
+        if raw_line == "\n":
+            line_order.append(("__blank__", 0))
+            continue
+
+        if use_c:
+            parsed = c_parse_line(raw_line)
+            if parsed is None:
+                line_order.append(("__blank__", 0))
+                continue
+            record_type, row_dict, top_keys = parsed
+        else:
+            stripped = raw_line.rstrip("\r")
             if not stripped:
                 line_order.append(("__blank__", 0))
                 continue
-
             top, _, top_keys = _parse_object_raw(stripped)
             if not top:
                 line_order.append(("__blank__", 0))
                 continue
-
             type_raw = top.get("type", '"__notype__"')
             if type_raw.startswith('"'):
                 record_type = type_raw[1:-1]
             else:
                 record_type = type_raw
-
             row_dict = {}
-
             for k in top_keys:
                 if k == "type" or k == "content":
                     continue
@@ -387,43 +414,42 @@ def _parse_chunk(args):
                     row_dict[k] = top[k]
                 else:
                     row_dict[f"e.{k}"] = top[k]
-
             content_raw = top.get("content")
             content_keys = []
             if content_raw is not None:
                 if content_raw.startswith("{"):
-                    content_obj, _, content_keys = _parse_object_raw(content_raw)
+                    content_obj, _, content_keys = _parse_object_raw(
+                        content_raw)
                     for ck in content_keys:
                         row_dict[f"c.{ck}"] = content_obj[ck]
                 else:
                     row_dict["c.__raw__"] = content_raw
                     content_keys = ["__raw__"]
-
             row_dict["__ckeys__"] = _CKEYS_SEP.join(content_keys)
 
-            if record_type not in type_columns:
-                type_columns[record_type] = list(row_dict.keys())
-                type_col_index[record_type] = {
-                    c: i for i, c in enumerate(type_columns[record_type])
-                }
-                type_records[record_type] = []
-                type_field_orders[record_type] = top_keys
+        # --- Common path: manage columns and build row ---
+        if record_type not in type_columns:
+            type_columns[record_type] = list(row_dict.keys())
+            type_col_index[record_type] = {
+                c: i for i, c in enumerate(type_columns[record_type])
+            }
+            type_records[record_type] = []
+            type_field_orders[record_type] = list(top_keys)
 
-            cols = type_columns[record_type]
-            col_idx = type_col_index[record_type]
-            for k in row_dict:
-                if k not in col_idx:
-                    col_idx[k] = len(cols)
-                    cols.append(k)
+        cols = type_columns[record_type]
+        col_idx = type_col_index[record_type]
+        for k in row_dict:
+            if k not in col_idx:
+                col_idx[k] = len(cols)
+                cols.append(k)
 
-            row = [""] * len(cols)
-            for k, v in row_dict.items():
-                row[col_idx[k]] = v
+        row = [""] * len(cols)
+        for k, v in row_dict.items():
+            row[col_idx[k]] = v
 
-            idx = len(type_records[record_type])
-            type_records[record_type].append(row)
-            line_order.append((record_type, idx))
-            line_num += 1
+        type_records[record_type].append(row)
+        line_order.append((record_type, len(type_records[record_type]) - 1))
+        line_num += 1
 
     return (type_records, type_columns, type_col_index,
             type_field_orders, line_order, line_num)
@@ -446,18 +472,23 @@ def _merge_chunks(chunk_results):
 
         for record_type in type_records:
             if record_type not in merged_columns:
-                # First time seeing this type — adopt columns directly
-                merged_columns[record_type] = list(type_columns[record_type])
-                merged_col_index[record_type] = {
-                    c: i for i, c in enumerate(merged_columns[record_type])
-                }
-                merged_records[record_type] = []
+                # First time seeing this type — adopt directly (no copy)
+                merged_columns[record_type] = type_columns[record_type]
+                merged_col_index[record_type] = type_col_index[record_type]
+                merged_records[record_type] = type_records[record_type]
                 merged_field_orders[record_type] = type_field_orders[record_type]
+                continue
 
-            # Merge column sets: the chunk may have discovered new columns
-            mcols = merged_columns[record_type]
-            mcol_idx = merged_col_index[record_type]
+            # Fast path: if columns match exactly, just extend (no remapping)
             chunk_cols = type_columns[record_type]
+            mcols = merged_columns[record_type]
+
+            if chunk_cols == mcols:
+                merged_records[record_type].extend(type_records[record_type])
+                continue
+
+            # Slow path: columns differ, need remapping
+            mcol_idx = merged_col_index[record_type]
 
             # Build mapping from chunk column positions to merged positions
             col_mapping = []
@@ -467,23 +498,33 @@ def _merge_chunks(chunk_results):
                     mcols.append(c)
                 col_mapping.append(mcol_idx[c])
 
-            # Remap and append rows
-            merged_ncols = len(mcols)
-            for chunk_row in type_records[record_type]:
-                new_row = [""] * merged_ncols
-                for i, val in enumerate(chunk_row):
-                    if i < len(col_mapping):
-                        new_row[col_mapping[i]] = val
-                merged_records[record_type].append(new_row)
+            # Check if mapping is identity (same order, merged just has more)
+            is_identity = all(col_mapping[i] == i for i in range(len(col_mapping)))
+
+            if is_identity:
+                # Columns are a prefix of merged — just pad and extend
+                merged_ncols = len(mcols)
+                pad_n = merged_ncols - len(chunk_cols)
+                if pad_n > 0:
+                    pad = [""] * pad_n
+                    for chunk_row in type_records[record_type]:
+                        chunk_row.extend(pad)
+                merged_records[record_type].extend(type_records[record_type])
+            else:
+                # Full remap needed (rare)
+                merged_ncols = len(mcols)
+                for chunk_row in type_records[record_type]:
+                    new_row = [""] * merged_ncols
+                    for i, val in enumerate(chunk_row):
+                        if i < len(col_mapping):
+                            new_row[col_mapping[i]] = val
+                    merged_records[record_type].append(new_row)
 
         # Remap line_order indices to merged offsets
-        for entry_type, entry_idx in line_order:
-            if entry_type == "__blank__":
-                merged_line_order.append(("__blank__", 0))
-            else:
-                merged_line_order.append(
-                    (entry_type, type_offset[entry_type] + entry_idx))
-
+        merged_line_order.extend(
+            (et, 0) if et == "__blank__" else (et, type_offset[et] + ei)
+            for et, ei in line_order
+        )
         total_lines += line_count
 
     return (merged_records, merged_columns, merged_col_index,
@@ -629,16 +670,42 @@ def encode(
     # Decide output format based on whether schema is provided
     if schema is not None:
         # Schema mode: write compact binary manifest
-        type_index = schema["type_index"]
+        # Extend schema with any new types not seen during training
+        type_index = dict(schema["type_index"])
+        schema_types = dict(schema.get("types", {}))
+        next_idx = max(type_index.values()) + 1 if type_index else 0
+
+        for type_name in sorted(meta_types.keys()):
+            if type_name not in type_index:
+                type_index[type_name] = next_idx
+                next_idx += 1
+                # Add type info to schema so decoder can find it
+                tinfo = meta_types[type_name]
+                schema_types[type_name] = {
+                    "tsv_file": tinfo["tsv_file"],
+                    "field_order": tinfo["field_order"],
+                    "columns": tinfo["columns"],
+                }
+                if "content_schema" in tinfo:
+                    schema_types[type_name]["content_schema"] = tinfo[
+                        "content_schema"]
+                if "content_schemas" in tinfo:
+                    schema_types[type_name]["content_schemas"] = tinfo[
+                        "content_schemas"]
+
+        # Build manifest with (possibly extended) type_index
         manifest_data = build_manifest(
             line_num, meta_types, compact_order, type_index)
         manifest_path = output_dir / "manifest.bin"
         with open(manifest_path, "wb") as f:
             f.write(manifest_data)
 
-        # Also write schema.json for self-contained decompression
+        # Write extended schema.json for self-contained decompression
+        extended_schema = dict(schema)
+        extended_schema["type_index"] = type_index
+        extended_schema["types"] = schema_types
         schema_path = output_dir / "schema.json"
-        save_schema(schema, schema_path)
+        save_schema(extended_schema, schema_path)
 
         routing_path = manifest_path
     else:
@@ -673,6 +740,17 @@ def encode(
 # ---------------------------------------------------------------------------
 # Decode
 # ---------------------------------------------------------------------------
+
+def _load_tsv_rows(tsv_file: Path) -> List[List[bytes]]:
+    """Bulk-read a TSV file into rows of bytes, skipping the header."""
+    raw = tsv_file.read_bytes()
+    # Skip header line
+    first_nl = raw.index(b"\n")
+    body = raw[first_nl + 1:]
+    if not body:
+        return []
+    return [line.split(b"\t") for line in body.split(b"\n") if line]
+
 
 def decode(
     input_dir: Path,
@@ -729,14 +807,7 @@ def _decode_v5(
 
         columns = tinfo["columns"]
         type_cols[type_name] = columns
-        records = []
-
-        with open(tsv_file, "r", encoding="utf-8") as fh:
-            fh.readline()  # skip header
-            for line in fh:
-                records.append(line.rstrip("\n").split("\t"))
-
-        type_data[type_name] = records
+        type_data[type_name] = _load_tsv_rows(tsv_file)
 
     # Reconstruct JSONL
     _write_jsonl(output_file, line_order, type_schema, type_data,
@@ -769,14 +840,7 @@ def _decode_v4(
 
         columns = tinfo["columns"]
         type_cols[type_name] = columns
-        records = []
-
-        with open(tsv_file, "r", encoding="utf-8") as fh:
-            fh.readline()  # skip header
-            for line in fh:
-                records.append(line.rstrip("\n").split("\t"))
-
-        type_data[type_name] = records
+        type_data[type_name] = _load_tsv_rows(tsv_file)
 
     line_order = _rle_decode(meta["line_order"])
     _write_jsonl(output_file, line_order, type_meta, type_data,
@@ -788,64 +852,195 @@ def _write_jsonl(
     output_file: Path,
     line_order: List[Tuple[str, int]],
     type_info_map: Dict[str, dict],
-    type_data: Dict[str, List[List[str]]],
+    type_data: Dict[str, List],
     type_cols: Dict[str, List[str]],
     verbose: bool,
 ) -> None:
-    """Shared JSONL reconstruction logic for v4 and v5."""
-    with open(output_file, "w", encoding="utf-8", newline="") as out:
-        for record_type, orig_idx in line_order:
-            if record_type == "__blank__":
-                out.write("\n")
+    """Shared JSONL reconstruction logic for v4 and v5.
+
+    Optimised for telemetry workloads: pre-computes a per-type
+    reconstruction template so the inner loop is array-index lookups
+    instead of dict lookups, and buffers output writes.
+    All template fragments and row data are bytes to avoid per-line encoding.
+    """
+    _COMMA = b","
+    _EMPTY = b""
+    _CONTENT_OPEN = b'"content":{'
+    _CLOSE = b"}"
+    _OPEN = b"{"
+    _NL = b"\n"
+    _CLOSE_NL = b"}\n"
+    _CKEYS_SEP_B = _CKEYS_SEP.encode("utf-8")
+
+    type_templates = {}
+    for type_name, tinfo in type_info_map.items():
+        if type_name not in type_data:
+            continue
+        columns = type_cols[type_name]
+        col_map = {c: i for i, c in enumerate(columns)}
+        field_order = tinfo.get("field_order", [])
+
+        type_literal_b = ('"type":"' + type_name + '"').encode("utf-8")
+        instructions = []
+
+        for field_name in field_order:
+            if field_name == "type":
+                instructions.append(("type_literal", type_literal_b))
                 continue
 
-            tinfo = type_info_map[record_type]
-            columns = type_cols[record_type]
-            field_order = tinfo.get("field_order", [])
+            if field_name == "content":
+                if "content_schema" in tinfo and tinfo["content_schema"]:
+                    ckeys = tinfo["content_schema"].split(_CKEYS_SEP)
+                    content_cols = []
+                    for ck in ckeys:
+                        cidx = col_map.get(f"c.{ck}")
+                        if cidx is not None:
+                            content_cols.append(
+                                (cidx, ('"' + ck + '":').encode("utf-8")))
+                    instructions.append(("content_uniform", content_cols))
+                elif "content_schemas" in tinfo:
+                    skidx_col = col_map.get("__skidx__", -1)
+                    schemas_list = []
+                    for schema_str in tinfo["content_schemas"]:
+                        if schema_str:
+                            ckeys = schema_str.split(_CKEYS_SEP)
+                            cols_for_schema = []
+                            for ck in ckeys:
+                                cidx = col_map.get(f"c.{ck}")
+                                if cidx is not None:
+                                    cols_for_schema.append(
+                                        (cidx,
+                                         ('"' + ck + '":').encode("utf-8")))
+                            schemas_list.append(cols_for_schema)
+                        else:
+                            schemas_list.append([])
+                    instructions.append(
+                        ("content_multi", skidx_col, schemas_list))
+                else:
+                    ckeys_col = col_map.get("__ckeys__", -1)
+                    instructions.append(("content_ckeys", ckeys_col, col_map))
+                continue
+
+            if field_name in _ENVELOPE_FIELDS_SET:
+                cidx = col_map.get(field_name)
+            else:
+                cidx = col_map.get(f"e.{field_name}")
+            if cidx is not None:
+                quoted_b = ('"' + field_name + '":').encode("utf-8")
+                instructions.append(("field", cidx, quoted_b))
+
+        type_templates[type_name] = instructions
+
+    # --- Write output with buffered binary I/O ---
+    _FLUSH_SIZE = 1 << 20  # 1 MiB
+    buf = bytearray()
+
+    with open(output_file, "wb") as out:
+        for record_type, orig_idx in line_order:
+            if record_type == "__blank__":
+                buf.extend(_NL)
+                if len(buf) >= _FLUSH_SIZE:
+                    out.write(buf)
+                    buf.clear()
+                continue
 
             row = type_data[record_type][orig_idx]
+            instructions = type_templates[record_type]
 
-            # Column lookup
-            cell: Dict[str, str] = {}
-            for i, col in enumerate(columns):
-                cell[col] = row[i] if i < len(row) else ""
+            parts = [_OPEN]
+            first_field = True
 
-            # A1: content key recovery
-            if "content_schema" in tinfo:
-                content_keys = (tinfo["content_schema"].split(_CKEYS_SEP)
-                                if tinfo["content_schema"] else [])
-            elif "content_schemas" in tinfo:
-                skidx_str = cell.get("__skidx__", "0")
-                skidx = int(skidx_str) if skidx_str else 0
-                schema_str = tinfo["content_schemas"][skidx]
-                content_keys = (schema_str.split(_CKEYS_SEP)
-                                if schema_str else [])
-            else:
-                ckeys_raw = cell.get("__ckeys__", "")
-                content_keys = (ckeys_raw.split(_CKEYS_SEP)
-                                if ckeys_raw else [])
+            for instr in instructions:
+                kind = instr[0]
 
-            # Rebuild JSON in original key order
-            pairs: List[str] = []
-            for field_name in field_order:
-                if field_name == "type":
-                    pairs.append(f'"type":"{record_type}"')
-                elif field_name == "content":
-                    pairs.append(
-                        '"content":'
-                        + _rebuild_content(cell, content_keys)
-                    )
-                elif field_name in _ENVELOPE_FIELDS_SET:
-                    val = cell.get(field_name, "")
+                if kind == "type_literal":
+                    if not first_field:
+                        parts.append(_COMMA)
+                    parts.append(instr[1])
+                    first_field = False
+                    continue
+
+                if kind == "field":
+                    _, cidx, quoted_b = instr
+                    val = row[cidx] if cidx < len(row) else _EMPTY
                     if val:
-                        pairs.append(f'"{field_name}":{val}')
-                else:
-                    ekey = f"e.{field_name}"
-                    val = cell.get(ekey, "")
-                    if val:
-                        pairs.append(f'"{field_name}":{val}')
+                        if not first_field:
+                            parts.append(_COMMA)
+                        parts.append(quoted_b)
+                        parts.append(val)
+                        first_field = False
 
-            out.write("{" + ",".join(pairs) + "}\n")
+                elif kind == "content_uniform":
+                    content_cols = instr[1]
+                    if not first_field:
+                        parts.append(_COMMA)
+                    parts.append(_CONTENT_OPEN)
+                    first_field = False
+                    first_c = True
+                    for cidx, ck_prefix in content_cols:
+                        val = row[cidx] if cidx < len(row) else _EMPTY
+                        if val:
+                            if not first_c:
+                                parts.append(_COMMA)
+                            parts.append(ck_prefix)
+                            parts.append(val)
+                            first_c = False
+                    parts.append(_CLOSE)
+
+                elif kind == "content_multi":
+                    _, skidx_col, schemas_list = instr
+                    skidx_val = row[skidx_col] if skidx_col < len(row) else b"0"
+                    skidx = int(skidx_val) if skidx_val else 0
+                    content_cols = schemas_list[skidx]
+                    if not first_field:
+                        parts.append(_COMMA)
+                    parts.append(_CONTENT_OPEN)
+                    first_field = False
+                    first_c = True
+                    for cidx, ck_prefix in content_cols:
+                        val = row[cidx] if cidx < len(row) else _EMPTY
+                        if val:
+                            if not first_c:
+                                parts.append(_COMMA)
+                            parts.append(ck_prefix)
+                            parts.append(val)
+                            first_c = False
+                    parts.append(_CLOSE)
+
+                elif kind == "content_ckeys":
+                    _, ckeys_col, col_map_local = instr
+                    ckeys_raw = row[ckeys_col] if ckeys_col < len(row) else _EMPTY
+                    if not first_field:
+                        parts.append(_COMMA)
+                    parts.append(_CONTENT_OPEN)
+                    first_field = False
+                    if ckeys_raw:
+                        ckeys = ckeys_raw.split(_CKEYS_SEP_B)
+                        first_c = True
+                        for ck in ckeys:
+                            ck_str = ck.decode("utf-8")
+                            cidx = col_map_local.get(f"c.{ck_str}")
+                            if cidx is not None:
+                                val = row[cidx] if cidx < len(row) else _EMPTY
+                                if val:
+                                    if not first_c:
+                                        parts.append(_COMMA)
+                                    parts.append(b'"')
+                                    parts.append(ck)
+                                    parts.append(b'":')
+                                    parts.append(val)
+                                    first_c = False
+                    parts.append(_CLOSE)
+
+            parts.append(_CLOSE_NL)
+            buf.extend(b"".join(parts))
+
+            if len(buf) >= _FLUSH_SIZE:
+                out.write(buf)
+                buf.clear()
+
+        if buf:
+            out.write(buf)
 
     if verbose:
         total = sum(len(recs) for recs in type_data.values())
@@ -853,18 +1048,6 @@ def _write_jsonl(
             f"  [telemetry_codec] Reconstructed {total} records "
             f"-> {output_file.name}"
         )
-
-
-def _rebuild_content(
-    cell: Dict[str, str],
-    content_keys: List[str],
-) -> str:
-    pairs = []
-    for fname in content_keys:
-        val = cell.get(f"c.{fname}", "")
-        if val:
-            pairs.append(f'"{fname}":{val}')
-    return "{" + ",".join(pairs) + "}"
 
 
 # ---------------------------------------------------------------------------
