@@ -1,30 +1,37 @@
-"""nyx decompress — extract and decompress a .nyx archive."""
+"""nyx decompress — extract and decompress a .nyx archive or OpenZL Parquet file."""
 
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import click
 
 from ..core import openzl, archive
+from ..core.detect import is_parquet
 
 
 @click.command("decompress")
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False))
 @click.option("-o", "--output", "output_dir", type=click.Path(),
               default=None,
-              help="Output directory for decompressed chunks (default: <input>_decompressed/).")
+              help="Output path (directory for .nyx, file for .parquet).")
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output.")
+@click.option("--columns", type=str, default=None,
+              help="Comma-separated column names to decompress (Parquet only).")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output.")
-def decompress_cmd(input_file, output_dir, force, keep_temp, verbose):
-    """Decompress a .nyx archive.
+def decompress_cmd(input_file, output_dir, force, columns, keep_temp, verbose):
+    """Decompress a .nyx archive or OpenZL-compressed Parquet file.
 
-    Extracts and decompresses all chunks from the archive.
-    Note: postprocessing (binary chunks -> original text format) is not yet
-    implemented. Output will be decompressed binary chunks.
+    For Parquet files, reconstructs a standard Parquet file.
+    Use --columns to decompress only specific columns.
     """
     input_path = Path(input_file).resolve()
+
+    if is_parquet(input_path):
+        _decompress_parquet(input_path, output_dir, force, columns, verbose)
+        return
 
     # Default output directory
     if output_dir is None:
@@ -90,3 +97,50 @@ def decompress_cmd(input_file, output_dir, force, keep_temp, verbose):
             shutil.rmtree(tmpdir, ignore_errors=True)
         else:
             click.echo(f"Temp directory kept: {tmpdir}")
+
+
+def _decompress_parquet(input_path, output_path, force, columns_str, verbose):
+    """Decompress an OpenZL Parquet file to a standard Parquet file."""
+    from ..core.parquet_pipeline import decompress_parquet
+    from ..core.parquet_reader import is_openzl_parquet
+    from ..utils.paths import find_zli
+
+    if not is_openzl_parquet(input_path):
+        raise click.ClickException(
+            "This Parquet file is not OpenZL-compressed (missing openzl:version metadata)."
+        )
+
+    if output_path is None:
+        name = input_path.name
+        if name.endswith(".ozl.parquet"):
+            output_path = input_path.parent / name.replace(".ozl.parquet", "_restored.parquet")
+        else:
+            output_path = input_path.parent / (input_path.stem + "_restored.parquet")
+    output_path = Path(output_path).resolve()
+
+    if output_path.exists() and not force:
+        raise click.UsageError(
+            f"Output file exists: {output_path}. Use -f/--force to overwrite."
+        )
+
+    columns = None
+    if columns_str:
+        columns = [c.strip() for c in columns_str.split(",")]
+
+    zli = str(find_zli())
+
+    click.echo(f"Decompressing {input_path.name}...")
+    t0 = time.monotonic()
+
+    decompress_parquet(
+        input_path, output_path, zli, columns=columns, verbose=verbose,
+    )
+
+    elapsed = time.monotonic() - t0
+
+    import os
+    click.echo(
+        f"Done: {output_path.name} "
+        f"({os.path.getsize(output_path):,} bytes) "
+        f"in {elapsed:.1f}s"
+    )

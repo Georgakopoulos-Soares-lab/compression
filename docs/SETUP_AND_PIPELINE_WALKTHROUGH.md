@@ -29,7 +29,20 @@ The pipeline uses a Python CLI (`nyx`) to orchestrate the build, preprocessing, 
 | **macOS** | `brew install python@3.13` or `pyenv install 3.13` |
 | **Ubuntu/Debian** | `sudo apt install python3 python3-pip python3-venv` |
 
-### 1.3 Optional Packages (Recommended)
+### 1.3 Python Packages (Required for Parquet support)
+
+The Parquet compression pipeline requires `pyarrow` and `numpy`. These are listed in `nyx/pyproject.toml` and installed automatically when you `pip install -e ./nyx`, but if you need to install them manually:
+
+```bash
+pip install pyarrow>=14.0 numpy>=1.24
+```
+
+| Package | Required? | Why |
+|---|---|---|
+| **pyarrow** | Yes (for Parquet) | Reads/writes Apache Parquet files, provides Arrow columnar arrays. |
+| **numpy** | Yes (for Parquet) | Efficient numeric array operations during column encoding/decoding. |
+
+### 1.4 Optional Packages (Recommended)
 
 ```bash
 # macOS
@@ -322,6 +335,78 @@ source nyx/.venv/bin/activate          # Activate it
 pip install -e ./nyx                   # Install the CLI
 nyx build                              # Build OpenZL + preprocessor (~2-5 min)
 
-# === Run ===
+# === Run (genomic files) ===
 nyx compress genome.fasta --benchmark  # Compress + compare against baselines
+
+# === Run (Parquet files) ===
+nyx compress data.parquet -o data.ozl.parquet -v    # Compress with OpenZL
+nyx inspect data.ozl.parquet                        # Show schema + per-column info
+nyx decompress data.ozl.parquet -o restored.parquet # Restore original
 ```
+
+---
+
+## Part 6: Parquet Compression Pipeline
+
+Nyx also supports compressing Apache Parquet files using per-column OpenZL compression, producing valid Parquet files that any tool can read the metadata from while achieving 25-50% better compression than Parquet+zstd.
+
+### 6.1 How it works
+
+```
+Input Parquet ──> Read with PyArrow
+                    │
+                    ├── For each column:
+                    │     1. Extract null bitmap
+                    │     2. Auto-detect best encoding:
+                    │        - raw (numeric pass-through)
+                    │        - delta (sorted/monotonic integers)
+                    │        - binary_convert (UUIDs, IPs, hashes → fixed-width bytes)
+                    │        - dictionary (low/medium cardinality strings)
+                    │     3. Compress encoded data with zli (inline training)
+                    │     4. Serialize: header + null bitmap + .zl frame(s)
+                    │
+                    └── Write valid Parquet file:
+                          - PAR1 magic bytes
+                          - Column chunks (OpenZL-compressed blobs as page data)
+                          - Thrift footer with schema, statistics, key-value metadata
+                          - PAR1 magic bytes
+```
+
+### 6.2 Commands
+
+```bash
+# Compress
+nyx compress input.parquet -o output.ozl.parquet -v
+
+# Inspect (shows schema, encoding, per-column sizes)
+nyx inspect output.ozl.parquet -v
+
+# Decompress (restore to standard Parquet)
+nyx decompress output.ozl.parquet -o restored.parquet
+
+# Decompress specific columns only
+nyx decompress output.ozl.parquet -o partial.parquet --columns "id,name,score"
+```
+
+### 6.3 Benchmark results (Phase 1)
+
+```
+Dataset                            Uncompr.      PQ+zstd    PQ+OpenZL    vs zstd
+──────────────────────────────────────────────────────────────────────────────────
+Numeric (7 cols, 3M rows)           81.3 MB      55.2 MB      36.5 MB    +34.0%
+Mixed (9 cols, 2M rows)             50.2 MB      32.4 MB      24.3 MB    +25.0%
+ML Features (51 cols, 500K rows)    91.0 MB      73.4 MB      37.0 MB    +49.5%
+Strings (8 cols, 1M rows)          232.2 MB      89.0 MB      67.8 MB    +23.8%
+──────────────────────────────────────────────────────────────────────────────────
+TOTAL                              454.7 MB     250.1 MB     165.6 MB    +33.8%
+```
+
+All datasets verified with lossless round-trip: decompressed files are bit-identical to the originals.
+
+### 6.4 Key properties
+
+- **Valid Parquet format**: Output files start and end with `PAR1`, contain correct Thrift footer.
+- **Metadata readable by any tool**: PyArrow, DuckDB, Spark can read schema, row count, column names, and key-value metadata without OpenZL.
+- **Per-column encoding**: Each column gets the best encoding strategy for its data type and distribution.
+- **Column pruning**: Decompress only the columns you need with `--columns`.
+- **Null preservation**: Validity bitmaps preserved across the round-trip.

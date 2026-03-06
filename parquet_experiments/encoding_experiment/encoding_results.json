@@ -1,0 +1,1054 @@
+{
+  "experiment": "encoding_before_openzl",
+  "timestamp": "2026-02-21T17:38:05.165489",
+  "results": [
+    {
+      "dataset": "numeric_heavy",
+      "column": "temperature",
+      "arrow_type": "float",
+      "num_rows": 3000000,
+      "raw_bytes": 12000000,
+      "parquet_zstd_bytes": 4082145,
+      "raw_openzl_bytes": 8492492,
+      "raw_openzl_time_secs": 166.7,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8435063,
+          "time_secs": 136.0,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 27.1
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 27.6
+            },
+            {
+              "stream": 2,
+              "compressed": 2374420,
+              "time_secs": 58.7
+            },
+            {
+              "stream": 3,
+              "compressed": 60591,
+              "time_secs": 22.7
+            }
+          ],
+          "vs_raw_openzl_pct": 0.7,
+          "vs_parquet_zstd_pct": -106.6
+        },
+        "xor_delta": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8699552,
+          "time_secs": 148.2,
+          "vs_raw_openzl_pct": -2.4,
+          "vs_parquet_zstd_pct": -113.1
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8652308,
+          "time_secs": 116.8,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 23.1
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 23.0
+            },
+            {
+              "stream": 2,
+              "compressed": 2579549,
+              "time_secs": 52.2
+            },
+            {
+              "stream": 3,
+              "compressed": 72707,
+              "time_secs": 18.5
+            }
+          ],
+          "vs_raw_openzl_pct": -1.9,
+          "vs_parquet_zstd_pct": -112.0
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "humidity",
+      "arrow_type": "float",
+      "num_rows": 3000000,
+      "raw_bytes": 12000000,
+      "parquet_zstd_bytes": 4004175,
+      "raw_openzl_bytes": 8167195,
+      "raw_openzl_time_secs": 120.7,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8136606,
+          "time_secs": 92.9,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 21.9
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 23.4
+            },
+            {
+              "stream": 2,
+              "compressed": 2110638,
+              "time_secs": 34.8
+            },
+            {
+              "stream": 3,
+              "compressed": 25916,
+              "time_secs": 12.9
+            }
+          ],
+          "vs_raw_openzl_pct": 0.4,
+          "vs_parquet_zstd_pct": -103.2
+        },
+        "xor_delta": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8367008,
+          "time_secs": 160.2,
+          "vs_raw_openzl_pct": -2.4,
+          "vs_parquet_zstd_pct": -109.0
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 8331772,
+          "time_secs": 116.7,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 25.3
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 22.7
+            },
+            {
+              "stream": 2,
+              "compressed": 2303098,
+              "time_secs": 55.9
+            },
+            {
+              "stream": 3,
+              "compressed": 28622,
+              "time_secs": 12.9
+            }
+          ],
+          "vs_raw_openzl_pct": -2.0,
+          "vs_parquet_zstd_pct": -108.1
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "pressure",
+      "arrow_type": "float",
+      "num_rows": 3000000,
+      "raw_bytes": 12000000,
+      "parquet_zstd_bytes": 3204486,
+      "raw_openzl_bytes": 4117516,
+      "raw_openzl_time_secs": 243.4,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 4093502,
+          "time_secs": 114.9,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 22.4
+            },
+            {
+              "stream": 1,
+              "compressed": 1029622,
+              "time_secs": 61.1
+            },
+            {
+              "stream": 2,
+              "compressed": 46064,
+              "time_secs": 18.6
+            },
+            {
+              "stream": 3,
+              "compressed": 17790,
+              "time_secs": 12.8
+            }
+          ],
+          "vs_raw_openzl_pct": 0.6,
+          "vs_parquet_zstd_pct": -27.7
+        },
+        "xor_delta": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 4229644,
+          "time_secs": 136.0,
+          "vs_raw_openzl_pct": -2.7,
+          "vs_parquet_zstd_pct": -32.0
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 4254185,
+          "time_secs": 109.7,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 21.4
+            },
+            {
+              "stream": 1,
+              "compressed": 1191382,
+              "time_secs": 61.7
+            },
+            {
+              "stream": 2,
+              "compressed": 43013,
+              "time_secs": 14.4
+            },
+            {
+              "stream": 3,
+              "compressed": 19764,
+              "time_secs": 12.2
+            }
+          ],
+          "vs_raw_openzl_pct": -3.3,
+          "vs_parquet_zstd_pct": -32.8
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "battery_voltage",
+      "arrow_type": "float",
+      "num_rows": 3000000,
+      "raw_bytes": 12000000,
+      "parquet_zstd_bytes": 4029798,
+      "raw_openzl_bytes": 7085773,
+      "raw_openzl_time_secs": 145.2,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 7083635,
+          "time_secs": 102.8,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 23.0
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 23.7
+            },
+            {
+              "stream": 2,
+              "compressed": 1083548,
+              "time_secs": 50.8
+            },
+            {
+              "stream": 3,
+              "compressed": 35,
+              "time_secs": 5.4
+            }
+          ],
+          "vs_raw_openzl_pct": 0.0,
+          "vs_parquet_zstd_pct": -75.8
+        },
+        "xor_delta": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 7236168,
+          "time_secs": 302.5,
+          "vs_raw_openzl_pct": -2.1,
+          "vs_parquet_zstd_pct": -79.6
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 12000000,
+          "compressed_bytes": 7212418,
+          "time_secs": 113.8,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 3000026,
+              "time_secs": 20.4
+            },
+            {
+              "stream": 1,
+              "compressed": 3000026,
+              "time_secs": 21.4
+            },
+            {
+              "stream": 2,
+              "compressed": 1212305,
+              "time_secs": 66.6
+            },
+            {
+              "stream": 3,
+              "compressed": 61,
+              "time_secs": 5.5
+            }
+          ],
+          "vs_raw_openzl_pct": -1.8,
+          "vs_parquet_zstd_pct": -79.0
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "device_id",
+      "arrow_type": "int32",
+      "num_rows": 3000000,
+      "raw_bytes": 12000000,
+      "parquet_zstd_bytes": 1318551,
+      "raw_openzl_bytes": 3750035,
+      "raw_openzl_time_secs": 99.0,
+      "encodings": {
+        "dict_int": {
+          "encoded_bytes": 6004000,
+          "compressed_bytes": 3750078,
+          "time_secs": 65.9,
+          "num_unique": 1000,
+          "index_profile": "le-i16",
+          "index_compressed": 3750035,
+          "dict_compressed": 43,
+          "vs_raw_openzl_pct": -0.0,
+          "vs_parquet_zstd_pct": -184.4
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "status_code",
+      "arrow_type": "int16",
+      "num_rows": 3000000,
+      "raw_bytes": 6000000,
+      "parquet_zstd_bytes": 148748,
+      "raw_openzl_bytes": 254723,
+      "raw_openzl_time_secs": 44.1,
+      "encodings": {
+        "dict_int": {
+          "encoded_bytes": 3000012,
+          "compressed_bytes": 254746,
+          "time_secs": 25.9,
+          "num_unique": 6,
+          "index_profile": "serial",
+          "index_compressed": 254714,
+          "dict_compressed": 32,
+          "vs_raw_openzl_pct": -0.0,
+          "vs_parquet_zstd_pct": -71.3
+        }
+      }
+    },
+    {
+      "dataset": "numeric_heavy",
+      "column": "timestamp",
+      "arrow_type": "int64",
+      "num_rows": 3000000,
+      "raw_bytes": 24000000,
+      "parquet_zstd_bytes": 2432879,
+      "raw_openzl_bytes": 3522613,
+      "raw_openzl_time_secs": 203.3,
+      "encodings": {
+        "delta_narrow": {
+          "encoded_bytes": 6000000,
+          "compressed_bytes": 3504605,
+          "time_secs": 81.5,
+          "container_width": 2,
+          "profile_used": "le-i16",
+          "original_width": 8,
+          "vs_raw_openzl_pct": 0.5,
+          "vs_parquet_zstd_pct": -44.1
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "is_returned",
+      "arrow_type": "bool",
+      "num_rows": 2000000,
+      "raw_bytes": 2000000,
+      "parquet_zstd_bytes": 54687,
+      "raw_openzl_bytes": 72370,
+      "raw_openzl_time_secs": 12.8,
+      "encodings": {
+        "bitpack": {
+          "encoded_bytes": 250000,
+          "compressed_bytes": 71936,
+          "time_secs": 7.2,
+          "vs_raw_openzl_pct": 0.6,
+          "vs_parquet_zstd_pct": -31.5
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "customer_id",
+      "arrow_type": "int32",
+      "num_rows": 2000000,
+      "raw_bytes": 8000000,
+      "parquet_zstd_bytes": 2158987,
+      "raw_openzl_bytes": 3614411,
+      "raw_openzl_time_secs": 102.6,
+      "encodings": {
+        "dict_int": {
+          "encoded_bytes": 4200000,
+          "compressed_bytes": 3622791,
+          "time_secs": 54.7,
+          "num_unique": 50000,
+          "index_profile": "le-i16",
+          "index_compressed": 3622746,
+          "dict_compressed": 45,
+          "vs_raw_openzl_pct": -0.2,
+          "vs_parquet_zstd_pct": -67.8
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "quantity",
+      "arrow_type": "int16",
+      "num_rows": 2000000,
+      "raw_bytes": 4000000,
+      "parquet_zstd_bytes": 473625,
+      "raw_openzl_bytes": 620299,
+      "raw_openzl_time_secs": 34.2,
+      "encodings": {
+        "dict_int": {
+          "encoded_bytes": 2000040,
+          "compressed_bytes": 620377,
+          "time_secs": 30.3,
+          "num_unique": 20,
+          "index_profile": "serial",
+          "index_compressed": 620340,
+          "dict_compressed": 37,
+          "vs_raw_openzl_pct": -0.0,
+          "vs_parquet_zstd_pct": -31.0
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "unit_price",
+      "arrow_type": "double",
+      "num_rows": 2000000,
+      "raw_bytes": 16000000,
+      "parquet_zstd_bytes": 1260402,
+      "raw_openzl_bytes": 1864491,
+      "raw_openzl_time_secs": 125.9,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 5823157,
+          "time_secs": 231.1,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 659553,
+              "time_secs": 30.4
+            },
+            {
+              "stream": 1,
+              "compressed": 661514,
+              "time_secs": 28.9
+            },
+            {
+              "stream": 2,
+              "compressed": 658737,
+              "time_secs": 27.6
+            },
+            {
+              "stream": 3,
+              "compressed": 659555,
+              "time_secs": 32.8
+            },
+            {
+              "stream": 4,
+              "compressed": 659553,
+              "time_secs": 26.8
+            },
+            {
+              "stream": 5,
+              "compressed": 909444,
+              "time_secs": 22.9
+            },
+            {
+              "stream": 6,
+              "compressed": 1587227,
+              "time_secs": 45.5
+            },
+            {
+              "stream": 7,
+              "compressed": 27574,
+              "time_secs": 16.1
+            }
+          ],
+          "vs_raw_openzl_pct": -212.3,
+          "vs_parquet_zstd_pct": -362.0
+        },
+        "xor_delta": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 2552879,
+          "time_secs": 507.1,
+          "vs_raw_openzl_pct": -36.9,
+          "vs_parquet_zstd_pct": -102.5
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 7616885,
+          "time_secs": 542.4,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 899930,
+              "time_secs": 107.6
+            },
+            {
+              "stream": 1,
+              "compressed": 898762,
+              "time_secs": 114.4
+            },
+            {
+              "stream": 2,
+              "compressed": 899006,
+              "time_secs": 67.6
+            },
+            {
+              "stream": 3,
+              "compressed": 898008,
+              "time_secs": 43.1
+            },
+            {
+              "stream": 4,
+              "compressed": 896039,
+              "time_secs": 46.1
+            },
+            {
+              "stream": 5,
+              "compressed": 1310162,
+              "time_secs": 79.6
+            },
+            {
+              "stream": 6,
+              "compressed": 1783840,
+              "time_secs": 55.5
+            },
+            {
+              "stream": 7,
+              "compressed": 31138,
+              "time_secs": 28.5
+            }
+          ],
+          "vs_raw_openzl_pct": -308.5,
+          "vs_parquet_zstd_pct": -504.3
+        },
+        "dict_float": {
+          "encoded_bytes": 4012400,
+          "compressed_bytes": 1857326,
+          "time_secs": 373.6,
+          "num_unique": 1550,
+          "index_profile": "le-i16",
+          "index_compressed": 1856898,
+          "dict_compressed": 428,
+          "vs_raw_openzl_pct": 0.4,
+          "vs_parquet_zstd_pct": -47.4
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "total_amount",
+      "arrow_type": "double",
+      "num_rows": 2000000,
+      "raw_bytes": 16000000,
+      "parquet_zstd_bytes": 2238556,
+      "raw_openzl_bytes": 3615484,
+      "raw_openzl_time_secs": 213.9,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 9471477,
+          "time_secs": 418.9,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 1163610,
+              "time_secs": 46.3
+            },
+            {
+              "stream": 1,
+              "compressed": 1163101,
+              "time_secs": 62.3
+            },
+            {
+              "stream": 2,
+              "compressed": 1163616,
+              "time_secs": 44.8
+            },
+            {
+              "stream": 3,
+              "compressed": 1163448,
+              "time_secs": 46.3
+            },
+            {
+              "stream": 4,
+              "compressed": 1168743,
+              "time_secs": 32.7
+            },
+            {
+              "stream": 5,
+              "compressed": 1926747,
+              "time_secs": 24.1
+            },
+            {
+              "stream": 6,
+              "compressed": 1712624,
+              "time_secs": 127.5
+            },
+            {
+              "stream": 7,
+              "compressed": 9588,
+              "time_secs": 34.8
+            }
+          ],
+          "vs_raw_openzl_pct": -162.0,
+          "vs_parquet_zstd_pct": -323.1
+        },
+        "xor_delta": {
+          "error": "Command '['/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/nyx/openzl/cachedObjs/a33dfeb063ea425b910f4ad6d1ddd68a/zli', 'compress', '/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment/mixed_type/total_amount/total_amount_xordelta.bin', '--profile', 'le-i64', '--train-inline', '--output', '/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment/mixed_type/total_amount/total_amount_xordelta.zl', '--force']' timed out after 600 seconds"
+        },
+        "xor_delta_bytesplit": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 11824805,
+          "time_secs": 1155.2,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 1655473,
+              "time_secs": 229.7
+            },
+            {
+              "stream": 1,
+              "compressed": 1582078,
+              "time_secs": 188.7
+            },
+            {
+              "stream": 2,
+              "compressed": 1582058,
+              "time_secs": 221.5
+            },
+            {
+              "stream": 3,
+              "compressed": 1582048,
+              "time_secs": 234.5
+            },
+            {
+              "stream": 4,
+              "compressed": 1595705,
+              "time_secs": 177.0
+            },
+            {
+              "stream": 5,
+              "compressed": 2000024,
+              "time_secs": 29.5
+            },
+            {
+              "stream": 6,
+              "compressed": 1816855,
+              "time_secs": 50.4
+            },
+            {
+              "stream": 7,
+              "compressed": 10564,
+              "time_secs": 23.9
+            }
+          ],
+          "vs_raw_openzl_pct": -227.1,
+          "vs_parquet_zstd_pct": -428.2
+        }
+      }
+    },
+    {
+      "dataset": "mixed_type",
+      "column": "order_date",
+      "arrow_type": "timestamp[us]",
+      "num_rows": 2000000,
+      "raw_bytes": 16000000,
+      "parquet_zstd_bytes": 7670888,
+      "raw_openzl_bytes": 11434375,
+      "raw_openzl_time_secs": 137.4,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 11625348,
+          "time_secs": 192.9,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 2000024,
+              "time_secs": 22.9
+            },
+            {
+              "stream": 1,
+              "compressed": 2000024,
+              "time_secs": 18.5
+            },
+            {
+              "stream": 2,
+              "compressed": 2000024,
+              "time_secs": 17.1
+            },
+            {
+              "stream": 3,
+              "compressed": 2000024,
+              "time_secs": 18.2
+            },
+            {
+              "stream": 4,
+              "compressed": 2000024,
+              "time_secs": 20.3
+            },
+            {
+              "stream": 5,
+              "compressed": 1428832,
+              "time_secs": 53.2
+            },
+            {
+              "stream": 6,
+              "compressed": 196363,
+              "time_secs": 36.2
+            },
+            {
+              "stream": 7,
+              "compressed": 33,
+              "time_secs": 6.4
+            }
+          ],
+          "vs_raw_openzl_pct": -1.7,
+          "vs_parquet_zstd_pct": -51.6
+        },
+        "xor_delta": {
+          "encoded_bytes": 16000000,
+          "compressed_bytes": 11788170,
+          "time_secs": 525.8,
+          "vs_raw_openzl_pct": -3.1,
+          "vs_parquet_zstd_pct": -53.7
+        }
+      }
+    },
+    {
+      "dataset": "ml_features",
+      "column": "feature_01",
+      "arrow_type": "float",
+      "num_rows": 500000,
+      "raw_bytes": 2000000,
+      "parquet_zstd_bytes": 2125860,
+      "raw_openzl_bytes": 705403,
+      "raw_openzl_time_secs": 45.7,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 809442,
+          "time_secs": 45.5,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 493192,
+              "time_secs": 8.6
+            },
+            {
+              "stream": 1,
+              "compressed": 245720,
+              "time_secs": 12.5
+            },
+            {
+              "stream": 2,
+              "compressed": 45938,
+              "time_secs": 15.7
+            },
+            {
+              "stream": 3,
+              "compressed": 24592,
+              "time_secs": 8.8
+            }
+          ],
+          "vs_raw_openzl_pct": -14.7,
+          "vs_parquet_zstd_pct": 61.9
+        },
+        "xor_delta": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 857382,
+          "time_secs": 45.0,
+          "vs_raw_openzl_pct": -21.5,
+          "vs_parquet_zstd_pct": 59.7
+        }
+      }
+    },
+    {
+      "dataset": "ml_features",
+      "column": "feature_11",
+      "arrow_type": "float",
+      "num_rows": 500000,
+      "raw_bytes": 2000000,
+      "parquet_zstd_bytes": 2119928,
+      "raw_openzl_bytes": 1296288,
+      "raw_openzl_time_secs": 34.9,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 1310985,
+          "time_secs": 33.2,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 493176,
+              "time_secs": 7.0
+            },
+            {
+              "stream": 1,
+              "compressed": 493129,
+              "time_secs": 7.3
+            },
+            {
+              "stream": 2,
+              "compressed": 306628,
+              "time_secs": 12.0
+            },
+            {
+              "stream": 3,
+              "compressed": 18052,
+              "time_secs": 6.9
+            }
+          ],
+          "vs_raw_openzl_pct": -1.1,
+          "vs_parquet_zstd_pct": 38.2
+        },
+        "xor_delta": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 1394496,
+          "time_secs": 46.8,
+          "vs_raw_openzl_pct": -7.6,
+          "vs_parquet_zstd_pct": 34.2
+        }
+      }
+    },
+    {
+      "dataset": "ml_features",
+      "column": "feature_21",
+      "arrow_type": "float",
+      "num_rows": 500000,
+      "raw_bytes": 2000000,
+      "parquet_zstd_bytes": 229407,
+      "raw_openzl_bytes": 142420,
+      "raw_openzl_time_secs": 20.5,
+      "encodings": {
+        "byte_split": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 159076,
+          "time_secs": 47.7,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 43990,
+              "time_secs": 10.7
+            },
+            {
+              "stream": 1,
+              "compressed": 45594,
+              "time_secs": 11.9
+            },
+            {
+              "stream": 2,
+              "compressed": 43948,
+              "time_secs": 14.4
+            },
+            {
+              "stream": 3,
+              "compressed": 25544,
+              "time_secs": 10.7
+            }
+          ],
+          "vs_raw_openzl_pct": -11.7,
+          "vs_parquet_zstd_pct": 30.7
+        }
+      }
+    },
+    {
+      "dataset": "ml_features",
+      "column": "feature_31",
+      "arrow_type": "float",
+      "num_rows": 500000,
+      "raw_bytes": 2000000,
+      "parquet_zstd_bytes": 344394,
+      "raw_openzl_bytes": 312667,
+      "raw_openzl_time_secs": 17.6,
+      "encodings": {
+        "dict_float": {
+          "encoded_bytes": 500128,
+          "compressed_bytes": 312682,
+          "time_secs": 13.7,
+          "num_unique": 32,
+          "index_profile": "serial",
+          "index_compressed": 312532,
+          "dict_compressed": 150,
+          "vs_raw_openzl_pct": -0.0,
+          "vs_parquet_zstd_pct": 9.2
+        },
+        "byte_split": {
+          "encoded_bytes": 2000000,
+          "compressed_bytes": 1085468,
+          "time_secs": 87.0,
+          "stream_details": [
+            {
+              "stream": 0,
+              "compressed": 308766,
+              "time_secs": 19.3
+            },
+            {
+              "stream": 1,
+              "compressed": 308765,
+              "time_secs": 24.0
+            },
+            {
+              "stream": 2,
+              "compressed": 312564,
+              "time_secs": 19.4
+            },
+            {
+              "stream": 3,
+              "compressed": 155373,
+              "time_secs": 24.3
+            }
+          ],
+          "vs_raw_openzl_pct": -247.2,
+          "vs_parquet_zstd_pct": -215.2
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total_encodings_tested": 33,
+    "encodings_that_beat_raw_openzl": 6,
+    "encodings_that_beat_parquet_zstd": 6,
+    "best_encoding_per_column": {
+      "numeric_heavy/temperature": {
+        "encoding": "byte_split",
+        "compressed": 8435063,
+        "vs_raw_openzl_pct": 0.7,
+        "vs_parquet_zstd_pct": -106.6
+      },
+      "numeric_heavy/humidity": {
+        "encoding": "byte_split",
+        "compressed": 8136606,
+        "vs_raw_openzl_pct": 0.4,
+        "vs_parquet_zstd_pct": -103.2
+      },
+      "numeric_heavy/pressure": {
+        "encoding": "byte_split",
+        "compressed": 4093502,
+        "vs_raw_openzl_pct": 0.6,
+        "vs_parquet_zstd_pct": -27.7
+      },
+      "numeric_heavy/battery_voltage": {
+        "encoding": "byte_split",
+        "compressed": 7083635,
+        "vs_raw_openzl_pct": 0.0,
+        "vs_parquet_zstd_pct": -75.8
+      },
+      "numeric_heavy/device_id": {
+        "encoding": "dict_int",
+        "compressed": 3750078,
+        "vs_raw_openzl_pct": -0.0,
+        "vs_parquet_zstd_pct": -184.4
+      },
+      "numeric_heavy/status_code": {
+        "encoding": "dict_int",
+        "compressed": 254746,
+        "vs_raw_openzl_pct": -0.0,
+        "vs_parquet_zstd_pct": -71.3
+      },
+      "numeric_heavy/timestamp": {
+        "encoding": "delta_narrow",
+        "compressed": 3504605,
+        "vs_raw_openzl_pct": 0.5,
+        "vs_parquet_zstd_pct": -44.1
+      },
+      "mixed_type/is_returned": {
+        "encoding": "bitpack",
+        "compressed": 71936,
+        "vs_raw_openzl_pct": 0.6,
+        "vs_parquet_zstd_pct": -31.5
+      },
+      "mixed_type/customer_id": {
+        "encoding": "dict_int",
+        "compressed": 3622791,
+        "vs_raw_openzl_pct": -0.2,
+        "vs_parquet_zstd_pct": -67.8
+      },
+      "mixed_type/quantity": {
+        "encoding": "dict_int",
+        "compressed": 620377,
+        "vs_raw_openzl_pct": -0.0,
+        "vs_parquet_zstd_pct": -31.0
+      },
+      "mixed_type/unit_price": {
+        "encoding": "dict_float",
+        "compressed": 1857326,
+        "vs_raw_openzl_pct": 0.4,
+        "vs_parquet_zstd_pct": -47.4
+      },
+      "mixed_type/total_amount": {
+        "encoding": "byte_split",
+        "compressed": 9471477,
+        "vs_raw_openzl_pct": -162.0,
+        "vs_parquet_zstd_pct": -323.1
+      },
+      "mixed_type/order_date": {
+        "encoding": "byte_split",
+        "compressed": 11625348,
+        "vs_raw_openzl_pct": -1.7,
+        "vs_parquet_zstd_pct": -51.6
+      },
+      "ml_features/feature_01": {
+        "encoding": "byte_split",
+        "compressed": 809442,
+        "vs_raw_openzl_pct": -14.7,
+        "vs_parquet_zstd_pct": 61.9
+      },
+      "ml_features/feature_11": {
+        "encoding": "byte_split",
+        "compressed": 1310985,
+        "vs_raw_openzl_pct": -1.1,
+        "vs_parquet_zstd_pct": 38.2
+      },
+      "ml_features/feature_21": {
+        "encoding": "byte_split",
+        "compressed": 159076,
+        "vs_raw_openzl_pct": -11.7,
+        "vs_parquet_zstd_pct": 30.7
+      },
+      "ml_features/feature_31": {
+        "encoding": "dict_float",
+        "compressed": 312682,
+        "vs_raw_openzl_pct": -0.0,
+        "vs_parquet_zstd_pct": 9.2
+      }
+    }
+  }
+}

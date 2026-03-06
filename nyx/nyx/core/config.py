@@ -35,6 +35,8 @@ SCHEMA_REGISTRY: dict[str, FileTypeConfig] = {
 
 GENOMIC_TYPES = set(SCHEMA_REGISTRY.keys())
 
+OPENZL_CODEC_ID = 100
+
 # Defaults
 DEFAULT_THREADS = os.cpu_count() or 4
 DEFAULT_COMPRESS_JOBS = 4

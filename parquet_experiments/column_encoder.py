@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Column encoding pipeline for OpenZL Parquet compression.
 
-Provides a configurable encoding layer that preprocesses Parquet column data
-before OpenZL compression.  Five encoding strategies are supported, selectable
-via a string parameter:
+Deterministic workflow that auto-detects the best encoding for any Parquet
+column, then compresses it entirely with OpenZL (no zstd anywhere).
 
-    raw            – pass-through (fixed-width numerics)
-    dictionary     – build lookup table, replace values with integer indices
-    binary_convert – convert structured text (UUID/IP/hash) to compact binary
-    delta          – store first value + differences (sorted/monotonic data)
-    dict_delta     – dictionary encode, then delta-encode the index array
-    auto           – analyse column stats and pick the best encoding
+Decision tree:
+    Numeric column:
+      ├── Sorted/monotonic → delta encode + LE profile
+      └── Otherwise        → raw LE profile
+    String column:
+      ├── Binary-convertible (UUID/IP/hex) → binary_convert + LE profile
+      └── Otherwise → dictionary encode + OpenZL (indices: LE, dict blob: serial chunked)
 
 Usage:
     from column_encoder import ColumnEncoder
@@ -20,21 +20,22 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import socket
 import struct
 import subprocess
 import time
 import uuid as _uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-VALID_ENCODINGS = ("raw", "dictionary", "binary_convert", "delta", "dict_delta", "auto")
+VALID_ENCODINGS = ("raw", "dictionary", "binary_convert", "delta", "auto")
+
+DICT_CHUNK_SIZE = 1_000_000  # 1 MiB chunks for dictionary blob compression
 
 
 @dataclass
@@ -46,7 +47,6 @@ class EncodingResult:
     encoded_bytes: int = 0
     compressed_bytes: int = 0
     ratio_vs_raw: float = 0.0
-    ratio_vs_encoded: float = 0.0
     compress_time_secs: float = 0.0
     zl_path: str = ""
     sidecar_paths: list[str] = field(default_factory=list)
@@ -54,7 +54,11 @@ class EncodingResult:
 
 
 class ColumnEncoder:
-    """Configurable column encoder for OpenZL Parquet compression."""
+    """Deterministic column encoder for OpenZL Parquet compression.
+
+    Automatically selects the best encoding strategy for any column type,
+    then compresses entirely with OpenZL — no zstd, no external codecs.
+    """
 
     def __init__(self, zli_path: str | Path):
         self.zli = str(Path(zli_path).resolve())
@@ -74,17 +78,6 @@ class ColumnEncoder:
         output_dir: str | Path = ".",
         compress_timeout: int = 600,
     ) -> EncodingResult:
-        """Encode a column and compress it with OpenZL.
-
-        Parameters
-        ----------
-        column_data : Arrow array (possibly chunked)
-        column_name : name used for output file prefixes
-        column_type : Arrow data type of the column
-        encoding    : one of VALID_ENCODINGS
-        output_dir  : directory for output .bin / .zl files
-        compress_timeout : seconds before killing zli
-        """
         if encoding not in VALID_ENCODINGS:
             raise ValueError(f"Unknown encoding '{encoding}'. Choose from {VALID_ENCODINGS}")
 
@@ -97,37 +90,15 @@ class ColumnEncoder:
         if encoding == "auto":
             encoding = self._auto_detect(column_data, column_type)
 
-        dispatch = {
-            "raw": self._encode_raw,
-            "dictionary": self._encode_dictionary,
-            "binary_convert": self._encode_binary_convert,
-            "delta": self._encode_delta,
-            "dict_delta": self._encode_dict_delta,
+        pipelines = {
+            "raw": self._pipeline_raw,
+            "delta": self._pipeline_delta,
+            "binary_convert": self._pipeline_binary_convert,
+            "dictionary": self._pipeline_dictionary,
         }
 
-        bin_path, profile, raw_string_bytes, encoded_bytes, sidecar_paths, meta = dispatch[encoding](
-            column_data, column_type, column_name, out
-        )
-
-        zl_path = out / f"{column_name}_{encoding}.zl"
-        compressed_bytes, comp_time = self._compress(bin_path, profile, zl_path, compress_timeout)
-
-        ratio_raw = raw_string_bytes / compressed_bytes if compressed_bytes > 0 else 0
-        ratio_enc = encoded_bytes / compressed_bytes if compressed_bytes > 0 else 0
-
-        return EncodingResult(
-            column_name=column_name,
-            encoding=encoding,
-            profile=profile,
-            raw_string_bytes=raw_string_bytes,
-            encoded_bytes=encoded_bytes,
-            compressed_bytes=compressed_bytes,
-            ratio_vs_raw=round(ratio_raw, 3),
-            ratio_vs_encoded=round(ratio_enc, 3),
-            compress_time_secs=round(comp_time, 1),
-            zl_path=str(zl_path),
-            sidecar_paths=[str(p) for p in sidecar_paths],
-            metadata=meta,
+        return pipelines[encoding](
+            column_data, column_type, column_name, out, compress_timeout
         )
 
     # ------------------------------------------------------------------
@@ -135,37 +106,31 @@ class ColumnEncoder:
     # ------------------------------------------------------------------
 
     def _auto_detect(self, col: pa.Array, dtype: pa.DataType) -> str:
+        """Deterministic encoding selection for any column.
+
+        Numeric:  sorted → delta, otherwise → raw
+        String:   binary pattern → binary_convert, otherwise → dictionary
+        """
         if pa.types.is_string(dtype) or pa.types.is_large_string(dtype):
             return self._auto_detect_string(col)
-        if pa.types.is_integer(dtype) or pa.types.is_timestamp(dtype):
+        if (pa.types.is_integer(dtype) or pa.types.is_floating(dtype)
+                or pa.types.is_timestamp(dtype) or pa.types.is_boolean(dtype)):
             return self._auto_detect_numeric(col, dtype)
         return "raw"
 
     def _auto_detect_string(self, col: pa.Array) -> str:
         n = len(col)
         if n == 0:
-            return "raw"
+            return "dictionary"
 
-        unique_count = pc.count_distinct(col).as_py()
-
-        sample_size = min(100, n)
-        sample = [col[i].as_py() for i in range(sample_size) if col[i].is_valid]
+        sample = [col[i].as_py() for i in range(min(200, n)) if col[i].is_valid]
         if not sample:
-            return "raw"
+            return "dictionary"
 
-        bin_type = _detect_binary_type(sample)
-        if bin_type is not None:
+        if _detect_binary_type(sample) is not None:
             return "binary_convert"
 
-        if unique_count <= 65535:
-            if _is_sorted(col):
-                return "dict_delta"
-            return "dictionary"
-
-        if unique_count <= n // 2:
-            return "dictionary"
-
-        return "raw"
+        return "dictionary"
 
     def _auto_detect_numeric(self, col: pa.Array, dtype: pa.DataType) -> str:
         if _is_sorted(col):
@@ -173,73 +138,76 @@ class ColumnEncoder:
         return "raw"
 
     # ------------------------------------------------------------------
-    # Encoding: raw
+    # Pipeline: raw (numeric pass-through)
     # ------------------------------------------------------------------
 
-    def _encode_raw(self, col, dtype, name, out):
+    def _pipeline_raw(self, col, dtype, name, out, timeout) -> EncodingResult:
         profile, np_dtype, width = _arrow_type_to_profile(dtype)
         if profile is None:
-            if pa.types.is_string(dtype) or pa.types.is_large_string(dtype):
-                buf = bytearray()
-                for v in col.to_pylist():
-                    s = (v or "").encode("utf-8")
-                    buf.extend(struct.pack("<I", len(s)))
-                    buf.extend(s)
-                raw_bytes = len(buf)
-                bin_path = out / f"{name}_raw.bin"
-                bin_path.write_bytes(buf)
-                return bin_path, "serial", raw_bytes, raw_bytes, [], {}
             raise ValueError(f"Cannot raw-encode type {dtype}")
 
         arr = _extract_numeric(col, dtype, np_dtype)
-        raw_bytes = len(arr) * arr.itemsize
+        raw_bytes = arr.nbytes
         bin_path = out / f"{name}_raw.bin"
         arr.tofile(str(bin_path))
-        return bin_path, profile, raw_bytes, raw_bytes, [], {"width": width}
+
+        zl_path = out / f"{name}_raw.zl"
+        zl_size, elapsed = self._compress(bin_path, profile, zl_path, timeout)
+
+        return EncodingResult(
+            column_name=name, encoding="raw", profile=profile,
+            raw_string_bytes=raw_bytes, encoded_bytes=raw_bytes,
+            compressed_bytes=zl_size,
+            ratio_vs_raw=round(raw_bytes / zl_size, 3) if zl_size > 0 else 0,
+            compress_time_secs=round(elapsed, 1),
+            zl_path=str(zl_path),
+            metadata={"width": width},
+        )
 
     # ------------------------------------------------------------------
-    # Encoding: dictionary
+    # Pipeline: delta (sorted/monotonic numerics)
     # ------------------------------------------------------------------
 
-    def _encode_dictionary(self, col, dtype, name, out):
-        values = col.to_pylist()
-        raw_bytes = _string_raw_bytes(values)
+    def _pipeline_delta(self, col, dtype, name, out, timeout) -> EncodingResult:
+        profile, np_dtype, width = _arrow_type_to_profile(dtype)
+        if profile is None:
+            raise ValueError(f"Delta encoding requires a numeric column, got {dtype}")
 
-        unique_sorted = sorted(set(v for v in values if v is not None))
-        dict_map = {v: i for i, v in enumerate(unique_sorted)}
-        num_unique = len(unique_sorted)
+        arr = _extract_numeric(col, dtype, np_dtype)
+        raw_bytes = arr.nbytes
 
-        if num_unique <= 255:
-            idx_dtype, idx_profile = np.uint8, "serial"
-        elif num_unique <= 65535:
-            idx_dtype, idx_profile = np.uint16, "le-i16"
-        else:
-            idx_dtype, idx_profile = np.int32, "le-i32"
+        deltas = np.empty_like(arr)
+        deltas[0] = arr[0]
+        deltas[1:] = np.diff(arr)
 
-        indices = np.array([dict_map.get(v, 0) for v in values], dtype=idx_dtype)
-        idx_path = out / f"{name}_dict_indices.bin"
-        indices.tofile(str(idx_path))
+        bin_path = out / f"{name}_delta.bin"
+        deltas.tofile(str(bin_path))
 
-        dict_buf = _serialise_dict(unique_sorted)
-        dict_path = out / f"{name}_dict_values.bin"
-        dict_path.write_bytes(dict_buf)
+        zl_path = out / f"{name}_delta.zl"
+        zl_size, elapsed = self._compress(bin_path, profile, zl_path, timeout)
 
-        encoded_bytes = indices.nbytes + len(dict_buf)
-        meta = {"num_unique": num_unique, "index_dtype": str(idx_dtype.__name__), "dict_size": len(dict_buf)}
-        return idx_path, idx_profile, raw_bytes, encoded_bytes, [dict_path], meta
+        return EncodingResult(
+            column_name=name, encoding="delta", profile=profile,
+            raw_string_bytes=raw_bytes, encoded_bytes=raw_bytes,
+            compressed_bytes=zl_size,
+            ratio_vs_raw=round(raw_bytes / zl_size, 3) if zl_size > 0 else 0,
+            compress_time_secs=round(elapsed, 1),
+            zl_path=str(zl_path),
+            metadata={"base_value": int(arr[0]), "is_sorted": bool(np.all(deltas[1:] >= 0))},
+        )
 
     # ------------------------------------------------------------------
-    # Encoding: binary_convert
+    # Pipeline: binary_convert (UUID/IP/hex → compact binary)
     # ------------------------------------------------------------------
 
-    def _encode_binary_convert(self, col, dtype, name, out):
+    def _pipeline_binary_convert(self, col, dtype, name, out, timeout) -> EncodingResult:
         values = col.to_pylist()
         raw_bytes = _string_raw_bytes(values)
 
         sample = [v for v in values[:200] if v is not None]
         bin_type = _detect_binary_type(sample)
         if bin_type is None:
-            raise ValueError(f"Column '{name}' does not match any binary_convert pattern (UUID/IPv4/IPv6/hex)")
+            raise ValueError(f"Column '{name}' has no detectable binary pattern")
 
         converter, elem_size, profile = _BINARY_CONVERTERS[bin_type]
 
@@ -252,38 +220,30 @@ class ColumnEncoder:
 
         bin_path = out / f"{name}_binary.bin"
         bin_path.write_bytes(bin_buf)
-        encoded_bytes = len(bin_buf)
 
-        meta = {"binary_type": bin_type, "element_size": elem_size}
-        return bin_path, profile, raw_bytes, encoded_bytes, [], meta
+        zl_path = out / f"{name}_binary_convert.zl"
+        zl_size, elapsed = self._compress(bin_path, profile, zl_path, timeout)
 
-    # ------------------------------------------------------------------
-    # Encoding: delta
-    # ------------------------------------------------------------------
-
-    def _encode_delta(self, col, dtype, name, out):
-        profile, np_dtype, width = _arrow_type_to_profile(dtype)
-        if profile is None:
-            raise ValueError(f"Delta encoding requires a numeric column, got {dtype}")
-
-        arr = _extract_numeric(col, dtype, np_dtype)
-        raw_bytes = arr.nbytes
-
-        deltas = np.empty_like(arr)
-        deltas[0] = arr[0]
-        deltas[1:] = np.diff(arr)
-
-        delta_path = out / f"{name}_delta.bin"
-        deltas.tofile(str(delta_path))
-
-        meta = {"base_value": int(arr[0]), "is_sorted": bool(np.all(deltas[1:] >= 0))}
-        return delta_path, profile, raw_bytes, raw_bytes, [], meta
+        return EncodingResult(
+            column_name=name, encoding="binary_convert", profile=profile,
+            raw_string_bytes=raw_bytes, encoded_bytes=len(bin_buf),
+            compressed_bytes=zl_size,
+            ratio_vs_raw=round(raw_bytes / zl_size, 3) if zl_size > 0 else 0,
+            compress_time_secs=round(elapsed, 1),
+            zl_path=str(zl_path),
+            metadata={"binary_type": bin_type, "element_size": elem_size},
+        )
 
     # ------------------------------------------------------------------
-    # Encoding: dict_delta
+    # Pipeline: dictionary (universal string compression)
+    #
+    # 1. Build dictionary of unique values + integer index array
+    # 2. Compress index array with OpenZL LE profile
+    # 3. Compress dictionary blob with OpenZL serial (1 MiB chunks)
+    # Total compressed = index .zl + dictionary chunk .zl files
     # ------------------------------------------------------------------
 
-    def _encode_dict_delta(self, col, dtype, name, out):
+    def _pipeline_dictionary(self, col, dtype, name, out, timeout) -> EncodingResult:
         values = col.to_pylist()
         raw_bytes = _string_raw_bytes(values)
 
@@ -292,31 +252,76 @@ class ColumnEncoder:
         num_unique = len(unique_sorted)
 
         if num_unique <= 255:
-            idx_dtype, idx_profile = np.uint8, "serial"
+            idx_np_dtype, idx_profile = np.uint8, "serial"
         elif num_unique <= 65535:
-            idx_dtype, idx_profile = np.uint16, "le-i16"
+            idx_np_dtype, idx_profile = np.uint16, "le-i16"
         else:
-            idx_dtype, idx_profile = np.int32, "le-i32"
+            idx_np_dtype, idx_profile = np.int32, "le-i32"
 
-        indices = np.array([dict_map.get(v, 0) for v in values], dtype=idx_dtype)
-
-        deltas = np.empty_like(indices)
-        deltas[0] = indices[0]
-        deltas[1:] = np.diff(indices.astype(np.int64)).astype(idx_dtype)
-
-        delta_path = out / f"{name}_dict_delta_indices.bin"
-        deltas.tofile(str(delta_path))
+        indices = np.array([dict_map.get(v, 0) for v in values], dtype=idx_np_dtype)
 
         dict_buf = _serialise_dict(unique_sorted)
-        dict_path = out / f"{name}_dict_values.bin"
-        dict_path.write_bytes(dict_buf)
 
-        encoded_bytes = deltas.nbytes + len(dict_buf)
-        meta = {"num_unique": num_unique, "index_dtype": str(idx_dtype.__name__), "dict_size": len(dict_buf)}
-        return delta_path, idx_profile, raw_bytes, encoded_bytes, [dict_path], meta
+        idx_path = out / f"{name}_dict_indices.bin"
+        indices.tofile(str(idx_path))
+        idx_zl_path = out / f"{name}_dict_indices.zl"
+        idx_zl_size, idx_time = self._compress(idx_path, idx_profile, idx_zl_path, timeout)
+
+        dict_zl_size, dict_time, dict_zl_paths = self._compress_dict_blob(
+            dict_buf, name, out, timeout
+        )
+
+        total_compressed = idx_zl_size + dict_zl_size
+        total_time = idx_time + dict_time
+        encoded_bytes = indices.nbytes + len(dict_buf)
+
+        all_zl_paths = [str(idx_zl_path)] + [str(p) for p in dict_zl_paths]
+
+        return EncodingResult(
+            column_name=name, encoding="dictionary", profile=idx_profile,
+            raw_string_bytes=raw_bytes, encoded_bytes=encoded_bytes,
+            compressed_bytes=total_compressed,
+            ratio_vs_raw=round(raw_bytes / total_compressed, 3) if total_compressed > 0 else 0,
+            compress_time_secs=round(total_time, 1),
+            zl_path=str(idx_zl_path),
+            sidecar_paths=all_zl_paths[1:],
+            metadata={
+                "num_unique": num_unique,
+                "index_dtype": idx_np_dtype.__name__,
+                "dict_raw_bytes": len(dict_buf),
+                "dict_compressed_bytes": dict_zl_size,
+                "index_compressed_bytes": idx_zl_size,
+                "dict_chunks": len(dict_zl_paths),
+            },
+        )
+
+    def _compress_dict_blob(
+        self, dict_buf: bytes, name: str, out: Path, timeout: int
+    ) -> tuple[int, float, list[Path]]:
+        """Compress a dictionary blob with OpenZL serial in 1 MiB chunks."""
+        num_chunks = max(1, (len(dict_buf) + DICT_CHUNK_SIZE - 1) // DICT_CHUNK_SIZE)
+        total_size = 0
+        total_time = 0.0
+        zl_paths = []
+
+        for ci in range(num_chunks):
+            start = ci * DICT_CHUNK_SIZE
+            end = min(start + DICT_CHUNK_SIZE, len(dict_buf))
+            chunk = dict_buf[start:end]
+
+            chunk_bin = out / f"{name}_dict_chunk{ci:03d}.bin"
+            chunk_bin.write_bytes(chunk)
+
+            chunk_zl = out / f"{name}_dict_chunk{ci:03d}.zl"
+            sz, t = self._compress(chunk_bin, "serial", chunk_zl, timeout)
+            total_size += sz
+            total_time += t
+            zl_paths.append(chunk_zl)
+
+        return total_size, total_time, zl_paths
 
     # ------------------------------------------------------------------
-    # Compression
+    # Compression (single file)
     # ------------------------------------------------------------------
 
     def _compress(self, bin_path: Path, profile: str, zl_path: Path, timeout: int) -> tuple[int, float]:
@@ -345,7 +350,7 @@ class ColumnEncoder:
 # ======================================================================
 
 def _arrow_type_to_profile(dtype: pa.DataType):
-    """Return (profile, numpy_dtype, width) for a given Arrow type."""
+    """Map Arrow data type → (OpenZL profile, numpy dtype, byte width)."""
     if dtype == pa.int16():
         return "le-i16", np.dtype("<i2"), 2
     if dtype in (pa.int32(), pa.float32()):
@@ -370,7 +375,7 @@ def _arrow_type_to_profile(dtype: pa.DataType):
 
 
 def _extract_numeric(col: pa.Array, dtype: pa.DataType, np_dtype) -> np.ndarray:
-    """Extract an Arrow column as a contiguous numpy array."""
+    """Extract an Arrow column as a contiguous little-endian numpy array."""
     if pa.types.is_boolean(dtype):
         filled = pc.fill_null(col, False)
         return filled.to_numpy(zero_copy_only=False).astype(np.uint8)
@@ -395,7 +400,7 @@ def _string_raw_bytes(values: list) -> int:
 
 
 def _serialise_dict(unique_values: list) -> bytes:
-    """Serialise a dictionary as length-prefixed entries."""
+    """Serialise a dictionary as length-prefixed UTF-8 entries."""
     buf = bytearray()
     for v in unique_values:
         s = str(v).encode("utf-8")
@@ -405,7 +410,7 @@ def _serialise_dict(unique_values: list) -> bytes:
 
 
 def _is_sorted(col: pa.Array) -> bool:
-    """Check if an Arrow array is sorted (ascending)."""
+    """Check if an Arrow array is sorted ascending (sampled)."""
     try:
         n = len(col)
         if n <= 1:
@@ -446,7 +451,10 @@ def _convert_hex(s: str) -> bytes:
 
 
 def _detect_binary_type(sample: list[str]) -> str | None:
-    """Detect if sample strings are UUID, IPv4, IPv6, or hex hashes."""
+    """Detect if sample strings are UUID, IPv4, IPv6, or hex hashes.
+
+    Returns the type name if ≥95% of samples match, None otherwise.
+    """
     if not sample:
         return None
 

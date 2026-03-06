@@ -55,7 +55,9 @@ def generate_highcard_strings(num_rows: int = 1_000_000) -> pa.Table:
     for i in range(num_rows):
         ts = base_ts + i
         ts_hex = f"{ts:012x}"
-        rand_hex = f"{int(rng.integers(0, 2**63)) * 2 + int(rng.integers(0, 2)):016x}"
+        rand_a = int(rng.integers(0, 2**63))
+        rand_b = int(rng.integers(0, 2**63))
+        rand_hex = f"{rand_a:016x}{rand_b:016x}"
         uid = f"{ts_hex[:8]}-{ts_hex[8:12]}-7{rand_hex[:3]}-{rand_hex[3:7]}-{rand_hex[7:19]}"
         uuid_v7.append(uid)
 

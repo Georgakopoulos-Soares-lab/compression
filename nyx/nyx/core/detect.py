@@ -56,12 +56,24 @@ def detect_by_extension(filepath: Path) -> str | None:
 def detect_filetype(filepath: Path) -> str | None:
     """Detect file type using content first, then extension fallback.
 
-    Returns one of: 'fasta', 'fastq', 'vcf', or None for unknown.
+    Returns one of: 'fasta', 'fastq', 'vcf', 'parquet', or None for unknown.
     """
+    if is_parquet(filepath):
+        return "parquet"
     result = detect_by_content(filepath)
     if result:
         return result
     return detect_by_extension(filepath)
+
+
+def is_parquet(filepath: Path) -> bool:
+    """Check if a file is a Parquet file (PAR1 magic bytes)."""
+    try:
+        with open(filepath, "rb") as f:
+            magic = f.read(4)
+        return magic == b"PAR1"
+    except OSError:
+        return False
 
 
 def is_genomic(filetype: str | None) -> bool:

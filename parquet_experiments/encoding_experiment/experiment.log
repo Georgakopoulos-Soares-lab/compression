@@ -1,0 +1,400 @@
+
+======================================================================
+  numeric_heavy / temperature  (3 encodings)
+======================================================================
+  rows=3,000,000  type=float  raw=12,000,000
+  Parquet+zstd: 4,082,145   Raw OpenZL: 8,492,492
+
+    [1/34] byte_split...
+        stream 0: 3,000,026 bytes (27.1s)
+        stream 1: 3,000,026 bytes (27.6s)
+        stream 2: 2,374,420 bytes (58.7s)
+        stream 3: 60,591 bytes (22.7s)
+      → 8,435,063 bytes  (vs raw: +0.7%, vs zstd: -106.6%)  [136.0s]
+
+    [2/34] xor_delta...
+      → 8,699,552 bytes  (vs raw: -2.4%, vs zstd: -113.1%)  [148.2s]
+
+    [3/34] xor_delta_bytesplit...
+        stream 0: 3,000,026 bytes (23.1s)
+        stream 1: 3,000,026 bytes (23.0s)
+        stream 2: 2,579,549 bytes (52.2s)
+        stream 3: 72,707 bytes (18.5s)
+      → 8,652,308 bytes  (vs raw: -1.9%, vs zstd: -112.0%)  [116.8s]
+
+  [results saved after numeric_heavy/temperature]
+
+======================================================================
+  numeric_heavy / humidity  (3 encodings)
+======================================================================
+  rows=3,000,000  type=float  raw=12,000,000
+  Parquet+zstd: 4,004,175   Raw OpenZL: 8,167,195
+
+    [4/34] byte_split...
+        stream 0: 3,000,026 bytes (21.9s)
+        stream 1: 3,000,026 bytes (23.4s)
+        stream 2: 2,110,638 bytes (34.8s)
+        stream 3: 25,916 bytes (12.9s)
+      → 8,136,606 bytes  (vs raw: +0.4%, vs zstd: -103.2%)  [92.9s]
+
+    [5/34] xor_delta...
+      → 8,367,008 bytes  (vs raw: -2.4%, vs zstd: -109.0%)  [160.2s]
+
+    [6/34] xor_delta_bytesplit...
+        stream 0: 3,000,026 bytes (25.3s)
+        stream 1: 3,000,026 bytes (22.7s)
+        stream 2: 2,303,098 bytes (55.9s)
+        stream 3: 28,622 bytes (12.9s)
+      → 8,331,772 bytes  (vs raw: -2.0%, vs zstd: -108.1%)  [116.7s]
+
+  [results saved after numeric_heavy/humidity]
+
+======================================================================
+  numeric_heavy / pressure  (3 encodings)
+======================================================================
+  rows=3,000,000  type=float  raw=12,000,000
+  Parquet+zstd: 3,204,486   Raw OpenZL: 4,117,516
+
+    [7/34] byte_split...
+        stream 0: 3,000,026 bytes (22.4s)
+        stream 1: 1,029,622 bytes (61.1s)
+        stream 2: 46,064 bytes (18.6s)
+        stream 3: 17,790 bytes (12.8s)
+      → 4,093,502 bytes  (vs raw: +0.6%, vs zstd: -27.7%)  [114.9s]
+
+    [8/34] xor_delta...
+      → 4,229,644 bytes  (vs raw: -2.7%, vs zstd: -32.0%)  [136.0s]
+
+    [9/34] xor_delta_bytesplit...
+        stream 0: 3,000,026 bytes (21.4s)
+        stream 1: 1,191,382 bytes (61.7s)
+        stream 2: 43,013 bytes (14.4s)
+        stream 3: 19,764 bytes (12.2s)
+      → 4,254,185 bytes  (vs raw: -3.3%, vs zstd: -32.8%)  [109.7s]
+
+  [results saved after numeric_heavy/pressure]
+
+======================================================================
+  numeric_heavy / battery_voltage  (3 encodings)
+======================================================================
+  rows=3,000,000  type=float  raw=12,000,000
+  Parquet+zstd: 4,029,798   Raw OpenZL: 7,085,773
+
+    [10/34] byte_split...
+        stream 0: 3,000,026 bytes (23.0s)
+        stream 1: 3,000,026 bytes (23.7s)
+        stream 2: 1,083,548 bytes (50.8s)
+        stream 3: 35 bytes (5.4s)
+      → 7,083,635 bytes  (vs raw: 0.0%, vs zstd: -75.8%)  [102.8s]
+
+    [11/34] xor_delta...
+      → 7,236,168 bytes  (vs raw: -2.1%, vs zstd: -79.6%)  [302.5s]
+
+    [12/34] xor_delta_bytesplit...
+        stream 0: 3,000,026 bytes (20.4s)
+        stream 1: 3,000,026 bytes (21.4s)
+        stream 2: 1,212,305 bytes (66.6s)
+        stream 3: 61 bytes (5.5s)
+      → 7,212,418 bytes  (vs raw: -1.8%, vs zstd: -79.0%)  [113.8s]
+
+  [results saved after numeric_heavy/battery_voltage]
+
+======================================================================
+  numeric_heavy / device_id  (1 encodings)
+======================================================================
+  rows=3,000,000  type=int32  raw=12,000,000
+  Parquet+zstd: 1,318,551   Raw OpenZL: 3,750,035
+
+    [13/34] dict_int...
+      → 3,750,078 bytes  (vs raw: -0.0%, vs zstd: -184.4%)  [65.9s]
+
+  [results saved after numeric_heavy/device_id]
+
+======================================================================
+  numeric_heavy / status_code  (1 encodings)
+======================================================================
+  rows=3,000,000  type=int16  raw=6,000,000
+  Parquet+zstd: 148,748   Raw OpenZL: 254,723
+
+    [14/34] dict_int...
+      → 254,746 bytes  (vs raw: -0.0%, vs zstd: -71.3%)  [25.9s]
+
+  [results saved after numeric_heavy/status_code]
+
+======================================================================
+  numeric_heavy / timestamp  (1 encodings)
+======================================================================
+  rows=3,000,000  type=int64  raw=24,000,000
+  Parquet+zstd: 2,432,879   Raw OpenZL: 3,522,613
+
+    [15/34] delta_narrow...
+      → 3,504,605 bytes  (vs raw: +0.5%, vs zstd: -44.1%)  [81.5s]
+
+  [results saved after numeric_heavy/timestamp]
+
+======================================================================
+  mixed_type / is_returned  (1 encodings)
+======================================================================
+  rows=2,000,000  type=bool  raw=2,000,000
+  Parquet+zstd: 54,687   Raw OpenZL: 72,370
+
+    [16/34] bitpack...
+      → 71,936 bytes  (vs raw: +0.6%, vs zstd: -31.5%)  [7.2s]
+
+  [results saved after mixed_type/is_returned]
+
+======================================================================
+  mixed_type / customer_id  (1 encodings)
+======================================================================
+  rows=2,000,000  type=int32  raw=8,000,000
+  Parquet+zstd: 2,158,987   Raw OpenZL: 3,614,411
+
+    [17/34] dict_int...
+      → 3,622,791 bytes  (vs raw: -0.2%, vs zstd: -67.8%)  [54.7s]
+
+  [results saved after mixed_type/customer_id]
+
+======================================================================
+  mixed_type / quantity  (1 encodings)
+======================================================================
+  rows=2,000,000  type=int16  raw=4,000,000
+  Parquet+zstd: 473,625   Raw OpenZL: 620,299
+
+    [18/34] dict_int...
+      → 620,377 bytes  (vs raw: -0.0%, vs zstd: -31.0%)  [30.3s]
+
+  [results saved after mixed_type/quantity]
+
+======================================================================
+  mixed_type / unit_price  (4 encodings)
+======================================================================
+  rows=2,000,000  type=double  raw=16,000,000
+  Parquet+zstd: 1,260,402   Raw OpenZL: 1,864,491
+
+    [19/34] byte_split...
+        stream 0: 659,553 bytes (30.4s)
+        stream 1: 661,514 bytes (28.9s)
+        stream 2: 658,737 bytes (27.6s)
+        stream 3: 659,555 bytes (32.8s)
+        stream 4: 659,553 bytes (26.8s)
+        stream 5: 909,444 bytes (22.9s)
+        stream 6: 1,587,227 bytes (45.5s)
+        stream 7: 27,574 bytes (16.1s)
+      → 5,823,157 bytes  (vs raw: -212.3%, vs zstd: -362.0%)  [231.1s]
+
+    [20/34] xor_delta...
+      → 2,552,879 bytes  (vs raw: -36.9%, vs zstd: -102.5%)  [507.1s]
+
+    [21/34] xor_delta_bytesplit...
+        stream 0: 899,930 bytes (107.6s)
+        stream 1: 898,762 bytes (114.4s)
+        stream 2: 899,006 bytes (67.6s)
+        stream 3: 898,008 bytes (43.1s)
+        stream 4: 896,039 bytes (46.1s)
+        stream 5: 1,310,162 bytes (79.6s)
+        stream 6: 1,783,840 bytes (55.5s)
+        stream 7: 31,138 bytes (28.5s)
+      → 7,616,885 bytes  (vs raw: -308.5%, vs zstd: -504.3%)  [542.4s]
+
+    [22/34] dict_float...
+      → 1,857,326 bytes  (vs raw: +0.4%, vs zstd: -47.4%)  [373.6s]
+
+  [results saved after mixed_type/unit_price]
+
+======================================================================
+  mixed_type / total_amount  (3 encodings)
+======================================================================
+  rows=2,000,000  type=double  raw=16,000,000
+  Parquet+zstd: 2,238,556   Raw OpenZL: 3,615,484
+
+    [23/34] byte_split...
+        stream 0: 1,163,610 bytes (46.3s)
+        stream 1: 1,163,101 bytes (62.3s)
+        stream 2: 1,163,616 bytes (44.8s)
+        stream 3: 1,163,448 bytes (46.3s)
+        stream 4: 1,168,743 bytes (32.7s)
+        stream 5: 1,926,747 bytes (24.1s)
+        stream 6: 1,712,624 bytes (127.5s)
+        stream 7: 9,588 bytes (34.8s)
+      → 9,471,477 bytes  (vs raw: -162.0%, vs zstd: -323.1%)  [418.9s]
+
+    [24/34] xor_delta...
+      FAILED: Command '['/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/nyx/openzl/cachedObjs/a33dfeb063ea425b910f4ad6d1ddd68a/zli', 'compress', '/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment/mixed_type/total_amount/total_amount_xordelta.bin', '--profile', 'le-i64', '--train-inline', '--output', '/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment/mixed_type/total_amount/total_amount_xordelta.zl', '--force']' timed out after 600 seconds
+
+    [25/34] xor_delta_bytesplit...
+        stream 0: 1,655,473 bytes (229.7s)
+        stream 1: 1,582,078 bytes (188.7s)
+        stream 2: 1,582,058 bytes (221.5s)
+        stream 3: 1,582,048 bytes (234.5s)
+        stream 4: 1,595,705 bytes (177.0s)
+        stream 5: 2,000,024 bytes (29.5s)
+        stream 6: 1,816,855 bytes (50.4s)
+        stream 7: 10,564 bytes (23.9s)
+      → 11,824,805 bytes  (vs raw: -227.1%, vs zstd: -428.2%)  [1155.2s]
+
+  [results saved after mixed_type/total_amount]
+
+======================================================================
+  mixed_type / order_date  (2 encodings)
+======================================================================
+Traceback (most recent call last):
+  File "/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment.py", line 592, in <module>
+    main()
+    ~~~~^^
+  File "/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment.py", line 447, in main
+    arr, arrow_type = load_column(parquet_path, col_name)
+                      ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/pavlosrousoglou/Desktop/Cornell/startup/openzl/compression/parquet_experiments/encoding_experiment.py", line 161, in load_column
+    filled = pc.fill_null(col, col.type.to_pandas_dtype().type(0))
+                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+ValueError: Converting an integer to a NumPy datetime requires a specified unit
+
+  [SKIP] numeric_heavy/temperature — already completed
+
+  [SKIP] numeric_heavy/humidity — already completed
+
+  [SKIP] numeric_heavy/pressure — already completed
+
+  [SKIP] numeric_heavy/battery_voltage — already completed
+
+  [SKIP] numeric_heavy/device_id — already completed
+
+  [SKIP] numeric_heavy/status_code — already completed
+
+  [SKIP] numeric_heavy/timestamp — already completed
+
+  [SKIP] mixed_type/is_returned — already completed
+
+  [SKIP] mixed_type/customer_id — already completed
+
+  [SKIP] mixed_type/quantity — already completed
+
+  [SKIP] mixed_type/unit_price — already completed
+
+  [SKIP] mixed_type/total_amount — already completed
+
+======================================================================
+  mixed_type / order_date  (2 encodings)
+======================================================================
+  rows=2,000,000  type=timestamp[us]  raw=16,000,000
+  Parquet+zstd: 7,670,888   Raw OpenZL: 11,434,375
+
+    [26/34] byte_split...
+        stream 0: 2,000,024 bytes (22.9s)
+        stream 1: 2,000,024 bytes (18.5s)
+        stream 2: 2,000,024 bytes (17.1s)
+        stream 3: 2,000,024 bytes (18.2s)
+        stream 4: 2,000,024 bytes (20.3s)
+        stream 5: 1,428,832 bytes (53.2s)
+        stream 6: 196,363 bytes (36.2s)
+        stream 7: 33 bytes (6.4s)
+      → 11,625,348 bytes  (vs raw: -1.7%, vs zstd: -51.6%)  [192.9s]
+
+    [27/34] xor_delta...
+      → 11,788,170 bytes  (vs raw: -3.1%, vs zstd: -53.7%)  [525.8s]
+
+  [results saved after mixed_type/order_date]
+
+======================================================================
+  ml_features / feature_01  (2 encodings)
+======================================================================
+  rows=500,000  type=float  raw=2,000,000
+  Parquet+zstd: 2,125,860   Raw OpenZL: 705,403
+
+    [28/34] byte_split...
+        stream 0: 493,192 bytes (8.6s)
+        stream 1: 245,720 bytes (12.5s)
+        stream 2: 45,938 bytes (15.7s)
+        stream 3: 24,592 bytes (8.8s)
+      → 809,442 bytes  (vs raw: -14.7%, vs zstd: +61.9%)  [45.5s]
+
+    [29/34] xor_delta...
+      → 857,382 bytes  (vs raw: -21.5%, vs zstd: +59.7%)  [45.0s]
+
+  [results saved after ml_features/feature_01]
+
+======================================================================
+  ml_features / feature_11  (2 encodings)
+======================================================================
+  rows=500,000  type=float  raw=2,000,000
+  Parquet+zstd: 2,119,928   Raw OpenZL: 1,296,288
+
+    [30/34] byte_split...
+        stream 0: 493,176 bytes (7.0s)
+        stream 1: 493,129 bytes (7.3s)
+        stream 2: 306,628 bytes (12.0s)
+        stream 3: 18,052 bytes (6.9s)
+      → 1,310,985 bytes  (vs raw: -1.1%, vs zstd: +38.2%)  [33.2s]
+
+    [31/34] xor_delta...
+      → 1,394,496 bytes  (vs raw: -7.6%, vs zstd: +34.2%)  [46.8s]
+
+  [results saved after ml_features/feature_11]
+
+======================================================================
+  ml_features / feature_21  (1 encodings)
+======================================================================
+  rows=500,000  type=float  raw=2,000,000
+  Parquet+zstd: 229,407   Raw OpenZL: 142,420
+
+    [32/34] byte_split...
+        stream 0: 43,990 bytes (10.7s)
+        stream 1: 45,594 bytes (11.9s)
+        stream 2: 43,948 bytes (14.4s)
+        stream 3: 25,544 bytes (10.7s)
+      → 159,076 bytes  (vs raw: -11.7%, vs zstd: +30.7%)  [47.7s]
+
+  [results saved after ml_features/feature_21]
+
+======================================================================
+  ml_features / feature_31  (2 encodings)
+======================================================================
+  rows=500,000  type=float  raw=2,000,000
+  Parquet+zstd: 344,394   Raw OpenZL: 312,667
+
+    [33/34] dict_float...
+      → 312,682 bytes  (vs raw: -0.0%, vs zstd: +9.2%)  [13.7s]
+
+    [34/34] byte_split...
+        stream 0: 308,766 bytes (19.3s)
+        stream 1: 308,765 bytes (24.0s)
+        stream 2: 312,564 bytes (19.4s)
+        stream 3: 155,373 bytes (24.3s)
+      → 1,085,468 bytes  (vs raw: -247.2%, vs zstd: -215.2%)  [87.0s]
+
+  [results saved after ml_features/feature_31]
+
+
+========================================================================================================================
+  ENCODING EXPERIMENT RESULTS
+========================================================================================================================
+
+  Dataset: numeric_heavy
+  Column               | Type      |  Parquet+zstd |    Raw OpenZL | Best Encoding          |   Encoded+OZL |   vs Raw | vs Parquet
+  ---------------------------------------------------------------------------------------------------------------------------------
+  temperature          | float     |     4,082,145 |     8,492,492 | byte_split             |     8,435,063 |    +0.7% |    -106.6%
+  humidity             | float     |     4,004,175 |     8,167,195 | byte_split             |     8,136,606 |    +0.4% |    -103.2%
+  pressure             | float     |     3,204,486 |     4,117,516 | byte_split             |     4,093,502 |    +0.6% |     -27.7%
+  battery_voltage      | float     |     4,029,798 |     7,085,773 | byte_split             |     7,083,635 |     0.0% |     -75.8%
+  device_id            | int32     |     1,318,551 |     3,750,035 | dict_int               |     3,750,078 |    -0.0% |    -184.4%
+  status_code          | int16     |       148,748 |       254,723 | dict_int               |       254,746 |    -0.0% |     -71.3%
+  timestamp            | int64     |     2,432,879 |     3,522,613 | delta_narrow           |     3,504,605 |    +0.5% |     -44.1%
+
+  Dataset: mixed_type
+  Column               | Type      |  Parquet+zstd |    Raw OpenZL | Best Encoding          |   Encoded+OZL |   vs Raw | vs Parquet
+  ---------------------------------------------------------------------------------------------------------------------------------
+  is_returned          | bool      |        54,687 |        72,370 | bitpack                |        71,936 |    +0.6% |     -31.5%
+  customer_id          | int32     |     2,158,987 |     3,614,411 | dict_int               |     3,622,791 |    -0.2% |     -67.8%
+  quantity             | int16     |       473,625 |       620,299 | dict_int               |       620,377 |    -0.0% |     -31.0%
+  unit_price           | double    |     1,260,402 |     1,864,491 | dict_float             |     1,857,326 |    +0.4% |     -47.4%
+  total_amount         | double    |     2,238,556 |     3,615,484 | byte_split             |     9,471,477 |  -162.0% |    -323.1%
+  order_date           | timestamp[us] |     7,670,888 |    11,434,375 | byte_split             |    11,625,348 |    -1.7% |     -51.6%
+
+  Dataset: ml_features
+  Column               | Type      |  Parquet+zstd |    Raw OpenZL | Best Encoding          |   Encoded+OZL |   vs Raw | vs Parquet
+  ---------------------------------------------------------------------------------------------------------------------------------
+  feature_01           | float     |     2,125,860 |       705,403 | byte_split             |       809,442 |   -14.7% |     +61.9%
+  feature_11           | float     |     2,119,928 |     1,296,288 | byte_split             |     1,310,985 |    -1.1% |     +38.2%
+  feature_21           | float     |       229,407 |       142,420 | byte_split             |       159,076 |   -11.7% |     +30.7%
+  feature_31           | float     |       344,394 |       312,667 | dict_float             |       312,682 |    -0.0% |      +9.2%
+

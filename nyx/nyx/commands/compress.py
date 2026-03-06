@@ -59,8 +59,8 @@ from ..utils.paths import find_schema
 @click.option("-f", "--force", is_flag=True, help="Overwrite output file.")
 def compress_cmd(input_file, output_file, mode, sddl, filetype, threads,
                  max_time_secs, compress_jobs, target_train_mib, trainer,
-                 no_clustering, ace_successors, benchmark, keep_temp, verbose,
-                 force):
+                 no_clustering, ace_successors, benchmark, keep_temp,
+                 verbose, force):
     """Compress a file using OpenZL.
 
     Supports genomic formats (FASTA, FASTQ, VCF) with schema-aware compression,
@@ -74,6 +74,13 @@ def compress_cmd(input_file, output_file, mode, sddl, filetype, threads,
 
     # Detect file type
     detected = filetype or detect_filetype(input_path)
+
+    # Handle Parquet files with dedicated pipeline
+    if detected == "parquet":
+        pq_out = Path(output_file) if output_file else None
+        _compress_parquet(input_path, pq_out, force, verbose)
+        return
+
     genomic = is_genomic(detected)
 
     # Auto-select mode if not specified
@@ -507,3 +514,56 @@ def _format_time(secs: float) -> str:
     minutes = int(secs // 60)
     remaining = secs % 60
     return f"{minutes}m{remaining:.0f}s"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline: Parquet
+# ---------------------------------------------------------------------------
+
+def _compress_parquet(
+    input_path: Path,
+    output_path: Path,
+    force: bool,
+    verbose: bool,
+) -> None:
+    """Compress a Parquet file using OpenZL per-column compression."""
+    from ..core.parquet_pipeline import compress_parquet
+    from ..utils.paths import find_zli
+
+    if output_path is None:
+        output_path = Path(str(input_path) + ".ozl.parquet")
+
+    if output_path.exists() and not force:
+        raise click.UsageError(
+            f"Output file exists: {output_path}. Use -f/--force to overwrite."
+        )
+
+    zli = str(find_zli())
+
+    click.echo(f"Compressing Parquet file: {input_path.name}")
+    total_start = time.monotonic()
+
+    summary = compress_parquet(
+        input_path, output_path, zli, verbose=verbose,
+    )
+
+    total_secs = time.monotonic() - total_start
+    size_in = summary["input_size"]
+    size_out = summary["output_size"]
+    ratio = size_in / size_out if size_out > 0 else 0
+
+    click.echo(
+        f"\nDone: {_human_size(size_in)} -> {_human_size(size_out)} "
+        f"({ratio:.2f}x) in {_format_time(total_secs)}"
+    )
+
+    click.echo("\nPer-column breakdown:")
+    for col in summary["columns"]:
+        raw = col["raw_bytes"]
+        comp = col["compressed_bytes"]
+        col_ratio = raw / comp if comp > 0 else 0
+        click.echo(
+            f"  {col['name']:20s} {col['type']:12s} "
+            f"encoding={col['encoding']:16s} "
+            f"{_human_size(comp):>10s} ({col_ratio:.1f}x, {col['time_secs']:.0f}s)"
+        )

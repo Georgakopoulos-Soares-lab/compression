@@ -29,6 +29,8 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from parquet_experiments.column_encoder import ColumnEncoder, VALID_ENCODINGS, _detect_binary_type, _is_sorted, _arrow_type_to_profile
 
+AUTO_ENCODER = None  # lazily initialised ColumnEncoder for auto-detect
+
 DATA_DIR = Path(__file__).parent / "data"
 RESULTS_DIR = Path(__file__).parent / "results"
 OUT_DIR = Path(__file__).parent / "encoding_benchmark"
@@ -52,7 +54,11 @@ ZSTD_FILES = {
 
 
 def applicable_encodings(col: pa.Array, dtype: pa.DataType) -> list[str]:
-    """Return the list of encodings that can be applied to this column."""
+    """Return the list of encodings that can be applied to this column.
+
+    For strings, always include dictionary as a fallback so we never produce
+    zero results. binary_convert is added when a structured pattern is detected.
+    """
     result = []
 
     profile, _, _ = _arrow_type_to_profile(dtype)
@@ -69,12 +75,14 @@ def applicable_encodings(col: pa.Array, dtype: pa.DataType) -> list[str]:
         if bin_type is not None:
             result.append("binary_convert")
 
-        unique_count = pc.count_distinct(col).as_py()
-        if unique_count <= 500_000:
-            result.append("dictionary")
-            result.append("dict_delta")
+        result.append("dictionary")
 
     return result
+
+
+def get_auto_pick(encoder: ColumnEncoder, col: pa.Array, dtype: pa.DataType) -> str:
+    """Run the auto-detect logic and return what it would pick."""
+    return encoder._auto_detect(col, dtype)
 
 
 def get_parquet_zstd_column_size(dataset_name: str, col_name: str) -> int:
@@ -127,15 +135,18 @@ def run_benchmark(dataset_filter: str | None = None, timeout: int = 300):
             col_type = field.type
             col_data = table.column(col_name)
 
-            encodings = applicable_encodings(col_data.combine_chunks(), col_type)
+            combined = col_data.combine_chunks()
+            encodings = applicable_encodings(combined, col_type)
+            auto_pick = get_auto_pick(encoder, combined, col_type)
             pq_zstd_size = get_parquet_zstd_column_size(ds_name, col_name)
 
-            print(f"\n  {col_name} ({col_type}) — encodings: {encodings}")
+            print(f"\n  {col_name} ({col_type}) — auto: {auto_pick}, testing: {encodings}")
 
             col_result = {
                 "name": col_name,
                 "type": str(col_type),
                 "parquet_zstd_bytes": pq_zstd_size,
+                "auto_detected_encoding": auto_pick,
                 "encodings": {},
             }
 
@@ -205,17 +216,21 @@ def run_benchmark(dataset_filter: str | None = None, timeout: int = 300):
 
 
 def print_summary(all_results: dict):
-    print(f"\n{'='*90}")
+    print(f"\n{'='*100}")
     print(f"  ENCODING BENCHMARK SUMMARY")
-    print(f"{'='*90}")
+    print(f"{'='*100}")
 
     for ds_name, ds_data in all_results.items():
         print(f"\n--- {ds_name} ({ds_data['num_rows']:,} rows) ---")
-        print(f"  {'Column':22s} {'Type':12s} {'Best Enc':16s} {'Size':>8s} {'Pq+zstd':>8s} {'Savings':>8s}")
-        print(f"  {'-'*22} {'-'*12} {'-'*16} {'-'*8} {'-'*8} {'-'*8}")
+        print(f"  {'Column':22s} {'Type':12s} {'Auto':16s} {'Best':16s} {'Match':5s} {'Size':>8s} {'Pq+zstd':>8s} {'Savings':>8s}")
+        print(f"  {'-'*22} {'-'*12} {'-'*16} {'-'*16} {'-'*5} {'-'*8} {'-'*8} {'-'*8}")
+
+        auto_correct = 0
+        total_cols = 0
 
         for col in ds_data["columns"]:
             best = col.get("best_encoding") or "?"
+            auto = col.get("auto_detected_encoding") or "?"
             best_bytes = col.get("best_compressed_bytes", 0)
             pq_bytes = col.get("parquet_zstd_bytes", 0)
 
@@ -228,7 +243,16 @@ def print_summary(all_results: dict):
             else:
                 sav_str = "?"
 
-            print(f"  {col['name']:22s} {col['type']:12s} {best:16s} {size_str:>8s} {pq_str:>8s} {sav_str:>8s}")
+            match = "OK" if auto == best else "MISS"
+            if best != "?":
+                total_cols += 1
+                if auto == best:
+                    auto_correct += 1
+
+            print(f"  {col['name']:22s} {col['type']:12s} {auto:16s} {best:16s} {match:5s} {size_str:>8s} {pq_str:>8s} {sav_str:>8s}")
+
+        if total_cols > 0:
+            print(f"\n  Auto-detect accuracy: {auto_correct}/{total_cols} ({100*auto_correct/total_cols:.0f}%)")
 
 
 def main():
