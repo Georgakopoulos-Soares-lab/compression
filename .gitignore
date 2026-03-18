@@ -9,6 +9,10 @@ build/
 dist/
 *.so
 
+# C extension build artifacts
+*.so
+/build/
+
 # OS / editor
 .DS_Store
 *.swp
