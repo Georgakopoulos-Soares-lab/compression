@@ -1,0 +1,20 @@
+[Unit]
+Description=Telemetry Compression Sidecar
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/nom/lib/telemetry-compress/telemetry_sidecar.py \
+    --socket /var/run/nom-telemetry-sidecar/telemetry.sock \
+    --kafka-brokers {{ kafka_brokers }} \
+    --kafka-topic {{ kafka_topic }} \
+    --tls-ca /var/nom/secrets/pki/ca-format-1.pem \
+    --tls-cert /var/nom/secrets/pki/cert-kafka-general-producer-format-1.pem \
+    --tls-key /var/nom/secrets/pki/key-kafka-general-producer-format-1.key
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=nom-telemetry-sidecar
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
