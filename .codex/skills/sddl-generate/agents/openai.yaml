@@ -1,0 +1,4 @@
+interface:
+  display_name: "SDDL Generate"
+  short_description: "Generate SDDL and preprocessors"
+  default_prompt: "Use $sddl-generate to analyze an input file and generate a matching custom SDDL schema and preprocess.py."

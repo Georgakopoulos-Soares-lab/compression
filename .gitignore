@@ -13,6 +13,10 @@ __pycache__/
 *.pyc
 /nyx/dist/
 /nyx/build/
+/build/
+
+# Local native build artifacts
+/_telemetry_scanner*.so
 
 # OS / editor
 .DS_Store

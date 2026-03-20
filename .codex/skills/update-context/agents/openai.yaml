@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Context"
+  short_description: "Refresh project docs and changelog"
+  default_prompt: "Use $update-context to refresh PROJECT_CONTEXT.md and roll CHANGES.md into PROJECT_HISTORY.md."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hydrate Full"
+  short_description: "Load project context plus live OpenZL docs"
+  default_prompt: "Use $hydrate-full to load project context, current git state, and current OpenZL documentation."

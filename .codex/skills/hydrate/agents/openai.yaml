@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hydrate"
+  short_description: "Load project context and repo state"
+  default_prompt: "Use $hydrate to load project context from PROJECT_CONTEXT.md and summarize the current git state."
