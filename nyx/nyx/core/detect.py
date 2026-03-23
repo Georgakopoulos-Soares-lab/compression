@@ -1,5 +1,6 @@
 """Auto-detect genomic file types from file content and extension."""
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +47,19 @@ def detect_by_content(filepath: Path) -> Optional[str]:
         first_line = head.split(b"\n", 1)[0]
         if first_line.rstrip().endswith(b"}"):
             return "jsonl"
+
+    # DNS TSV: 21 tab-separated fields, col1 is microsecond timestamp, col2 is UUID
+    first_line = head.split(b"\n", 1)[0]
+    fields = first_line.split(b"\t")
+    if len(fields) == 21:
+        try:
+            col1 = fields[0].decode("ascii", errors="ignore")
+            col2 = fields[1].decode("ascii", errors="ignore")
+            if (col1.isdigit() and len(col1) == 16
+                    and re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", col2)):
+                return "dns"
+        except (IndexError, UnicodeDecodeError):
+            pass
 
     return None
 
@@ -109,4 +123,4 @@ def is_genomic(filetype: Optional[str]) -> bool:
 
 def is_structured(filetype: Optional[str]) -> bool:
     """Check if a file type is a supported structured format (non-genomic lossless)."""
-    return filetype in ("jsonl",)
+    return filetype in ("jsonl", "dns")

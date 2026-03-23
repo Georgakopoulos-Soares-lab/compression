@@ -12,10 +12,12 @@ from ._lossless import (
     decompress_lossless_fastq,
     decompress_lossless_vcf,
     decompress_lossless_jsonl,
+    decompress_lossless_dns,
     ZLFASTA_MAGIC,
     ZLFASTQ_MAGIC,
     ZLVCF_MAGIC,
     ZLJSONL_MAGIC,
+    ZLDNS_MAGIC,
 )
 
 
@@ -27,7 +29,7 @@ from ._lossless import (
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output.")
 @click.option("--keep-temp", is_flag=True, help="Keep temporary directories.")
 def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
-    """Decompress a Nyx archive (.zlfasta, .zlfastq, .zlvcf, .zljsonl, or .nyx).
+    """Decompress a Nyx archive (.zlfasta, .zlfastq, .zlvcf, .zljsonl, .zldns, or .nyx).
 
     Auto-detects the container format from magic bytes and routes to
     the appropriate decompression pipeline. Lossless containers produce
@@ -39,6 +41,7 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
       .zlfastq   Lossless FASTQ container → byte-identical .fastq
       .zlvcf     Lossless VCF container   → byte-identical .vcf
       .zljsonl   Lossless JSONL container → byte-identical .jsonl
+      .zldns     Lossless DNS TSV container → byte-identical .tsv
       .nyx       Tar-based archive        → decompressed chunks directory
 
     \b
@@ -137,6 +140,27 @@ def decompress_cmd(input_file, output_file, verbose, force, keep_temp):
 
         click.echo(f"Input: {input_path.name} (JSONL lossless container)")
         decompress_lossless_jsonl(input_path, output_path, verbose=verbose)
+
+    elif magic == ZLDNS_MAGIC:
+        # --- Lossless DNS TSV ---
+        if output_file is None:
+            name = input_path.name
+            if name.endswith(".zldns"):
+                output_name = name[: -len(".zldns")]
+            else:
+                output_name = name + ".tsv"
+            output_path = input_path.parent / output_name
+        else:
+            output_path = Path(output_file).resolve()
+
+        if output_path.exists() and not force:
+            raise click.ClickException(
+                f"Output already exists: {output_path}\n"
+                f"Use -f/--force to overwrite."
+            )
+
+        click.echo(f"Input: {input_path.name} (DNS TSV lossless container)")
+        decompress_lossless_dns(input_path, output_path, verbose=verbose)
 
     else:
         # --- .nyx archive (tar-based) ---
