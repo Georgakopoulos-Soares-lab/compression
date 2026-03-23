@@ -1,21 +1,27 @@
-# Downloaded genome data
+# Data (large files, not tracked)
 /data
-/bench_out
 
-# Nyx build artifacts (compiled inside nyx/)
+# OpenZL source and build (build locally)
 /nyx/openzl/
-/nyx/bin/
-/nyx/models2/
 
-# Python packaging
+# Compiled binaries
+/dns/dns_compress
+/dns/dns_decompress
+/dns/benchmark
+
+# Python (not used on this branch)
 *.egg-info/
 __pycache__/
 *.pyc
 /nyx/dist/
 /nyx/build/
+/nyx/bin/
+/nyx/models2/
+/bench_out
 
-# C extension build artifacts
+# Build artifacts
 *.so
+*.o
 /build/
 
 # OS / editor
