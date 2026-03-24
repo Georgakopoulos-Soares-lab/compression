@@ -1,0 +1,88 @@
+============================================================
+DNS TLV Binary Compression — Snappy vs OpenZL
+============================================================
+Date:       2026-03-22
+Data:       Raw TLV payloads extracted from GenericChunks
+            (nom-dns-base Kafka topic, POP Kafka)
+Files:      2,000 chunks (118.0 MB total, avg 59.0 KB/chunk)
+Iterations: 5 (best-of reported)
+
+------------------------------------------------------------
+                    Snappy      OpenZL       OpenZL
+                   (current)   (trained)   (untrained)
+------------------------------------------------------------
+Ratio:              4.24x       8.21x       7.85x
+Compressed size:    27.9 MB     14.4 MB     15.0 MB
+Compress speed:     1,351 MB/s  141 MB/s    198 MB/s
+Decompress speed:   2,928 MB/s  2,366 MB/s  2,304 MB/s
+------------------------------------------------------------
+
+KEY FINDINGS:
+
+1. COMPRESSION RATIO
+   OpenZL (trained) achieves 8.21x vs Snappy's 4.24x — a 1.94x
+   improvement. For 118 MB of TLV data:
+     - Snappy:  27.9 MB
+     - OpenZL:  14.4 MB  (48% less than Snappy)
+
+2. DECOMPRESSION SPEED
+   OpenZL decompresses at 2,366 MB/s — within 19% of Snappy's
+   2,928 MB/s. Both are memory-bandwidth bound at these speeds.
+   For 59 KB chunks, decompression takes ~25 microseconds each.
+
+3. COMPRESSION SPEED
+   OpenZL compresses at 141 MB/s vs Snappy's 1,351 MB/s.
+   Per 59 KB chunk: OpenZL ~0.4 ms, Snappy ~0.04 ms.
+   This is the tradeoff for 2x better compression.
+
+4. TRAINING VALUE
+   Training improves ratio from 7.85x to 8.21x (+4.6%) while
+   maintaining equivalent decompression speed (2,366 vs 2,304 MB/s).
+
+------------------------------------------------------------
+INFRASTRUCTURE IMPACT (projected)
+------------------------------------------------------------
+Based on production numbers from the pipeline reference:
+
+nom-dns-base topic:
+  Current (Snappy):  ~150 GB on disk (8 partitions × 18.7 GB)
+  With OpenZL:       ~77 GB on disk (48% reduction)
+  Savings:           ~73 GB per POP
+
+nom-dns-vertica topic:
+  Current (Snappy):  ~33 GB on disk (20 partitions × 1.7 GB)
+  With OpenZL:       ~17 GB on disk
+  Savings:           ~16 GB per DC
+
+Per-POP savings:     ~73 GB disk, proportional network reduction
+Across N POPs:       73 × N GB total savings
+
+Additional benefits:
+  - Less WAN bandwidth for POP→DC mirroring
+  - Longer Kafka retention with same disk budget
+  - Less broker I/O for replication
+  - Near-identical decompression latency (25 us per chunk)
+
+------------------------------------------------------------
+COMPRESSOR DETAILS
+------------------------------------------------------------
+Profile:            serial (raw bytes)
+Trainer:            greedy (default)
+Training data:      210 TLV files, 12 MB
+Compressor size:    dns_tlv_compressor.zl (small artifact)
+Training time:      < 1 minute
+
+Per-chunk Snappy stats:
+  Ratio range:      1.00x – 8.90x
+  Avg ratio:        3.93x
+  Compressed range: 0.1 KB – 21.6 KB (avg 13.9 KB)
+
+------------------------------------------------------------
+FILES
+------------------------------------------------------------
+dns_tlv_compressor.zl     Trained OpenZL compressor for TLV data
+benchmark_snappy_tlv.py   Snappy benchmark script (TLV binary)
+extract_generic_chunks.py GenericChunk decomposer
+RESULTS.txt               This file
+
+============================================================
