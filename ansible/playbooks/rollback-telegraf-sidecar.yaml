@@ -1,0 +1,32 @@
+---
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  tasks:
+    - name: "stop telemetry sidecar"
+      service:
+        name: nom-telemetry-sidecar
+        state: stopped
+        enabled: no
+      register: stop_result
+      failed_when: false
+
+    - name: "remove socket writer output config"
+      file:
+        path: /var/nom/nom-telegraf/telegraf.d/nom_socket_telemetry_output.conf
+        state: absent
+
+    - name: "restore original Kafka telemetry output"
+      command: >
+        mv /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf.disabled
+           /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf
+      args:
+        removes: /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf.disabled
+
+    - name: "reload telegraf to restore Kafka output"
+      service:
+        name: nom-telegraf
+        state: reloaded
+      register: reload_result
+      retries: 3
+      delay: 5
+      until: reload_result is success

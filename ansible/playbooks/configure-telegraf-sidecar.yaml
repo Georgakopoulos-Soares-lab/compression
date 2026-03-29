@@ -1,0 +1,29 @@
+---
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  tasks:
+    - name: "disable existing Kafka telemetry output"
+      command: >
+        mv /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf
+           /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf.disabled
+      args:
+        removes: /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf
+
+    - name: "create socket writer output config for sidecar"
+      copy:
+        dest: /var/nom/nom-telegraf/telegraf.d/nom_socket_telemetry_output.conf
+        content: |
+          [[outputs.socket_writer]]
+            address = "unix:///var/run/nom-telemetry-sidecar/telemetry.sock"
+            data_format = "json"
+            json_timestamp_units = "1us"
+        mode: "0644"
+
+    - name: "reload telegraf to pick up new config"
+      service:
+        name: nom-telegraf
+        state: reloaded
+      register: reload_result
+      retries: 3
+      delay: 5
+      until: reload_result is success

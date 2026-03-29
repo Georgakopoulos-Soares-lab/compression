@@ -1,0 +1,36 @@
+[Unit]
+Description=Telemetry Compression Sidecar
+After=network.target
+
+[Service]
+Type=simple
+{% set args = [] %}
+{% set _ = args.append("--socket /var/run/nom-telemetry-sidecar/telemetry.sock") %}
+{% set _ = args.append("--kafka-brokers " + kafka_brokers) %}
+{% set _ = args.append("--kafka-topic " + kafka_topic) %}
+{% if kafka_ssl | default(false) | bool %}
+{% set _ = args.append("--tls-ca /var/nom/secrets/pki/ca-format-1.pem") %}
+{% set _ = args.append("--tls-cert /var/nom/secrets/pki/cert-kafka-general-producer-format-1.pem") %}
+{% set _ = args.append("--tls-key /var/nom/secrets/pki/key-kafka-general-producer-format-1.key") %}
+{% else %}
+{% set _ = args.append("--no-tls") %}
+{% endif %}
+{% if compare_zstd | default(true) | bool %}
+{% set _ = args.append("--compare-zstd") %}
+{% endif %}
+{% if capture_dir | default(false) | bool %}
+{% set _ = args.append("--capture-dir " + (capture_path | default("/tmp/capture"))) %}
+{% set _ = args.append("--capture-max-mb " + (capture_max_mb | default("1") | string)) %}
+{% endif %}
+ExecStart=/usr/bin/python3 /usr/local/nom/lib/telemetry-compress/telemetry_sidecar.py \
+{% for arg in args[:-1] %}
+    {{ arg }} \
+{% endfor %}
+    {{ args[-1] }}
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=nom-telemetry-sidecar
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

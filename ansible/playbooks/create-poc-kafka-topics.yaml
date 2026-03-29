@@ -1,0 +1,76 @@
+---
+# Create a POC Kafka topic for A/B compression testing.
+# Run once per environment — each environment has its own Kafka cluster.
+# Follows the same pattern as the production create-mig-mir-topics role.
+#
+# Workflow:
+#   1. Places a topic definition JSON in /usr/local/nom/etc/kafka-topics/topics/
+#   2. Runs nom-kafka-configure-topics which reads from that directory
+#   3. Verifies the topic was created
+#
+# ems_broker_addr must be the broker's PRIVATE IP and port.
+# ems_zookeeper_addr defaults to <broker_private_ip>:2182 (override if needed).
+# ems_ssl defaults to false. Set to true for SSL-enabled environments.
+#
+# Usage (SSL off, default):
+#   ansible-playbook create-poc-kafka-topics.yaml \
+#     -i "<KAFKA_BROKER>," \
+#     -e ems_hosts="<KAFKA_BROKER>" \
+#     -e ems_broker_addr="<PRIVATE_IP>:9093" \
+#     -e ems_topic_name="nom-telemetry-poc-compressed" \
+#     -e ansible_user=centos --become
+#
+# Usage (SSL on):
+#   ansible-playbook create-poc-kafka-topics.yaml \
+#     -i "<KAFKA_BROKER>," \
+#     -e ems_hosts="<KAFKA_BROKER>" \
+#     -e ems_broker_addr="<PRIVATE_IP>:9093" \
+#     -e ems_topic_name="nom-telemetry-poc-compressed" \
+#     -e ems_ssl=true \
+#     -e ansible_user=centos --become
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  vars:
+    topic_name: "{{ ems_topic_name }}"
+    ssl_enabled: "{{ ems_ssl | default('false') | bool }}"
+    broker_ip: "{{ ems_broker_addr.split(':')[0] }}"
+    zookeeper_addr: "{{ ems_zookeeper_addr | default(broker_ip + ':2182') }}"
+    admin_properties: /usr/local/nom/etc/nom-kafka/admin-client.properties
+    command_config_flag: "{{ ssl_enabled | ternary('--command-config ' + admin_properties, '') }}"
+    topics_dir: /usr/local/nom/etc/kafka-topics/topics
+  tasks:
+    - name: "place topic definition for {{ topic_name }}"
+      copy:
+        dest: "{{ topics_dir }}/poc-{{ topic_name }}.json"
+        mode: "0644"
+        content: |
+          {
+              "topics": [
+                  {
+                      "topic": "{{ topic_name }}",
+                      "partitions": 1,
+                      "tags": ["telemetry", "dc", "pop", "dc-pop"],
+                      "weight": 3,
+                      "mandatory": true,
+                      "producer-roles": ["kafka-general-producer"],
+                      "consumer-roles": ["kafka-general-consumer"]
+                  }
+              ]
+          }
+
+    - name: "create {{ topic_name }}"
+      shell: >
+        /usr/local/nom/sbin/nom-kafka-configure-topics
+        --brokers {{ ems_broker_addr }}
+        --update
+        --whitelist {{ topic_name }}
+      environment: "{{ {} if ssl_enabled else {'NOM_KAFKA_ZOOKEEPER_OVERRIDE': zookeeper_addr} }}"
+
+    - name: "verify {{ topic_name }} was created"
+      shell: >
+        /usr/local/nom/sbin/kafka-topics
+        --bootstrap-server {{ ems_broker_addr }}
+        --list
+        {{ command_config_flag }}
+        | grep {{ topic_name }}
+      environment: "{{ {} if ssl_enabled else {'NOM_KAFKA_ZOOKEEPER_OVERRIDE': zookeeper_addr} }}"

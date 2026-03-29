@@ -1,0 +1,41 @@
+---
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  tasks:
+    - name: "ensure telemetry-compress directory exists on Data Loader VM"
+      file:
+        path: /usr/local/nom/lib/telemetry-compress
+        state: directory
+        mode: "0755"
+
+    - name: "deploy decompression Python files"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/{{ item }}"
+        dest: "/usr/local/nom/lib/telemetry-compress/{{ item }}"
+        mode: "0644"
+      loop:
+        - telemetry_service.py
+        - telemetry_codec.py
+        - zljsonl.py
+
+    - name: "deploy C extension"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/_telemetry_scanner.so"
+        dest: /usr/local/nom/lib/telemetry-compress/_telemetry_scanner.so
+        mode: "0755"
+
+    - name: "deploy zli binary"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/zli"
+        dest: /usr/local/nom/lib/telemetry-compress/zli
+        mode: "0755"
+
+    - name: "deploy decompress.sh wrapper"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/decompress.sh"
+        dest: /usr/local/nom/lib/telemetry-compress/decompress.sh
+        mode: "0755"
+
+    - name: "verify decompression toolchain is accessible"
+      command: python3 -c "import sys; sys.path.insert(0, '/usr/local/nom/lib/telemetry-compress'); import telemetry_service"
+      changed_when: false

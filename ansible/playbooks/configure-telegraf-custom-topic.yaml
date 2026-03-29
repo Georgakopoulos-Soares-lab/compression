@@ -1,0 +1,27 @@
+---
+# Redirect Telegraf's Kafka output to a custom topic.
+# Used for the uncompressed baseline environment (Environment B) in A/B testing.
+#
+# Usage:
+#   ansible-playbook configure-telegraf-custom-topic.yaml \
+#     -i "<VM>," \
+#     -e ems_hosts="<VM>" \
+#     -e ems_topic="nom-telemetry-poc-raw" \
+#     -e ansible_user=centos --become
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  tasks:
+    - name: "change telegraf kafka output topic to {{ ems_topic }}"
+      lineinfile:
+        path: /var/nom/nom-telegraf/telegraf.d/nom_kafka_telemetry_output.conf
+        regexp: '^[#\s\t]*topic'
+        line: '  topic = "{{ ems_topic }}"'
+
+    - name: "reload telegraf to pick up topic change"
+      service:
+        name: nom-telegraf
+        state: reloaded
+      register: reload_result
+      retries: 3
+      delay: 5
+      until: reload_result is success

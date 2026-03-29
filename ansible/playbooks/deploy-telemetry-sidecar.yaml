@@ -1,0 +1,98 @@
+---
+- hosts: "{{ ems_hosts }}"
+  gather_facts: no
+  tasks:
+    - name: "ensure telemetry-compress directory exists"
+      file:
+        path: /usr/local/nom/lib/telemetry-compress
+        state: directory
+        mode: "0755"
+
+    - name: "ensure models directory exists"
+      file:
+        path: /usr/local/nom/lib/telemetry-compress/models/lossless_telemetry
+        state: directory
+        mode: "0755"
+
+    - name: "deploy sidecar Python files"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/{{ item }}"
+        dest: "/usr/local/nom/lib/telemetry-compress/{{ item }}"
+        mode: "0644"
+      loop:
+        - telemetry_sidecar.py
+        - telemetry_service.py
+        - telemetry_codec.py
+        - zljsonl.py
+
+    - name: "deploy C extension"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/_telemetry_scanner.so"
+        dest: /usr/local/nom/lib/telemetry-compress/_telemetry_scanner.so
+        mode: "0755"
+
+    - name: "deploy zli binary"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/zli"
+        dest: /usr/local/nom/lib/telemetry-compress/zli
+        mode: "0755"
+
+    - name: "deploy decompress.sh wrapper"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/decompress.sh"
+        dest: /usr/local/nom/lib/telemetry-compress/decompress.sh
+        mode: "0755"
+
+    - name: "deploy trained compressor model"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/models/lossless_telemetry/telemetry_csv.zl_compressor"
+        dest: /usr/local/nom/lib/telemetry-compress/models/lossless_telemetry/telemetry_csv.zl_compressor
+        mode: "0644"
+
+    - name: "deploy telemetry schema"
+      copy:
+        src: "{{ ems_sidecar_src_dir }}/models/lossless_telemetry/telemetry_schema.json"
+        dest: /usr/local/nom/lib/telemetry-compress/models/lossless_telemetry/telemetry_schema.json
+        mode: "0644"
+
+    - name: "install Python dependencies"
+      pip:
+        executable: /usr/bin/pip3
+        name:
+          - kafka-python-ng
+          - zstandard
+        state: present
+
+    - name: "deploy systemd unit file"
+      template:
+        src: templates/nom-telemetry-sidecar.service.j2
+        dest: /etc/systemd/system/nom-telemetry-sidecar.service
+        mode: "0644"
+
+    - name: "reload systemd daemon"
+      systemd:
+        daemon_reload: yes
+
+    - name: "enable and restart telemetry sidecar"
+      service:
+        name: nom-telemetry-sidecar
+        state: restarted
+        enabled: yes
+      register: result
+      retries: 3
+      delay: 5
+      until: result is success
+
+    - name: "pause to mitigate start status race"
+      command: sleep 3
+
+    - name: "verify sidecar is running"
+      command: systemctl status nom-telemetry-sidecar
+      register: ems_sidecar_status
+      failed_when: ems_sidecar_status is failed
+
+    - name: "verify socket exists"
+      stat:
+        path: /var/run/nom-telemetry-sidecar/telemetry.sock
+      register: sock_stat
+      failed_when: not sock_stat.stat.exists

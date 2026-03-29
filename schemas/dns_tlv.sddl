@@ -1,0 +1,12 @@
+U32 = UInt32LE
+U16 = UInt16LE
+magic          : Byte[8]
+num_records    : U32
+base_timestamp : Byte[8]
+rec_lengths    : U32[num_records]
+time_deltas    : U32[num_records]
+client_port    : U16[num_records]
+inet_family    : Byte[num_records]
+columns_size   : U32
+columns_data   : Byte[columns_size]
+: Byte[_rem]
