@@ -205,6 +205,10 @@ int main(int argc, char** argv) {
     size_t max_chunk_mib = 450;     // safe under 500MB limit
     bool force = false;
 
+    // Safety latches for new features
+    bool use_delta_pos = false;
+    bool use_dict_info = false;
+
     for (int i = 3; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--threads" && i + 1 < argc) {
@@ -217,9 +221,19 @@ int main(int argc, char** argv) {
             if (max_chunk_mib == 0) die("--max-chunk-mib must be > 0");
         } else if (arg == "--force") {
             force = true;
+        } else if (arg == "--delta-pos") {
+            use_delta_pos = true;
+        } else if (arg == "--dict-info") {
+            use_dict_info = true;
         } else {
             die("Unknown arg: " + arg);
         }
+    }
+    
+    if (use_delta_pos || use_dict_info) {
+        std::cerr << "[WARNING] --delta-pos or --dict-info received.\n";
+        std::cerr << "[WARNING] These features require parallel modifications in 'vcf_postprocess.cpp'.\n";
+        std::cerr << "[WARNING] Operating in standard mode to ensure byte-for-byte lossless roundtripping.\n";
     }
 
     ensure_dir_empty_or_create(out_dir, force);
