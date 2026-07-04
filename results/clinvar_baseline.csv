@@ -1,0 +1,2 @@
+File,Type,Schema/Format,Original_MB,ZSTD_Ratio,ZSTD_Comp_sec,ZSTD_Decomp_sec,ZSTD_Valid,GZIP_Ratio,GZIP_Comp_sec,GZIP_Decomp_sec,GZIP_Valid,XZ_Ratio,XZ_Comp_sec,XZ_Decomp_sec,XZ_Valid,Genozip_Ratio,Genozip_Comp_sec,Genozip_Decomp_sec,Genozip_Valid,SPRING_Ratio,SPRING_Comp_sec,SPRING_Decomp_sec,SPRING_Valid,OpenZL_Ratio,OpenZL_Comp_sec,OpenZL_Decomp_sec,OpenZL_Valid
+clinvar.vcf,VCF,"8 Cols, Phased",1837.47,14.39,69.05,3.01,PASS,11.0,4.37,5.04,PASS,12.45,57.48,13.73,PASS,FAIL,0.01,0.0,FAIL,FAIL,0.0,0.0,FAIL,11.52,38.21,13.09,PASS

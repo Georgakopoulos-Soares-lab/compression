@@ -1,0 +1,2 @@
+File,Type,Schema/Format,Original_MB,ZSTD_Ratio,ZSTD_Comp_sec,ZSTD_Decomp_sec,ZSTD_Valid,GZIP_Ratio,GZIP_Comp_sec,GZIP_Decomp_sec,GZIP_Valid,XZ_Ratio,XZ_Comp_sec,XZ_Decomp_sec,XZ_Valid,Genozip_Ratio,Genozip_Comp_sec,Genozip_Decomp_sec,Genozip_Valid,SPRING_Ratio,SPRING_Comp_sec,SPRING_Decomp_sec,SPRING_Valid,OpenZL_Ratio,OpenZL_Comp_sec,OpenZL_Decomp_sec,OpenZL_Valid
+SRR8899104_500M.fastq,FASTQ,Short Read (~51bp),524.27,5.92,28.17,1.21,PASS,4.05,5.98,2.44,PASS,6.71,139.01,6.17,PASS,FAIL,0.0,0.0,FAIL,FAIL,0.0,0.0,FAIL,7.98,7.99,4.64,PASS
