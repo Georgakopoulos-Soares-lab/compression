@@ -1,9 +1,3 @@
-/*
- * fastq_preprocess.cpp — FASTQ preprocessor for compression (parallel)
- *
- * Upgraded: Includes TSV-safe Base-5 sequence packing (--pack-4bit)
- */
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -24,9 +18,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static const char MAGIC[] = "FQPP01";
+static const char MAGIC[] = "FQPP02"; // Bumped magic version for new flags
 
-// DNA Base Mapping
+// DNA Base Mappings
 inline int map_base(char c) {
     switch(c) {
         case 'A': case 'a': return 0;
@@ -37,6 +31,25 @@ inline int map_base(char c) {
     }
 }
 inline char unmap_base(int v) { return "ACGTN"[v]; }
+
+// Strict mapping for 3-bit (ATCG only)
+inline int map_base_strict(char c) {
+    switch(c) {
+        case 'A': case 'a': return 0;
+        case 'C': case 'c': return 1;
+        case 'G': case 'g': return 2;
+        case 'T': case 't': return 3;
+        default: return -1;
+    }
+}
+
+// Base64 Alphabet for TSV-safe 3-bit packing
+static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+static int b64_rev[256];
+void init_b64() {
+    for (int i = 0; i < 256; i++) b64_rev[i] = -1;
+    for (int i = 0; i < 64; i++) b64_rev[(uint8_t)b64[i]] = i;
+}
 
 struct ParsedHeader {
     const char* prefix_start;   int prefix_len;
@@ -104,26 +117,30 @@ static inline std::string sv(const char* s, int len) { return std::string(s, len
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        std::cerr << "Usage: fastq_preprocess <encode|decode> <input> <output> [threads] [--pack-4bit]\n";
+        std::cerr << "Usage: fastq_preprocess <encode|decode> <input> <output> [threads] [--pack-4bit | --pack-3bit]\n";
         return 1;
     }
 
+    init_b64();
     std::string mode = argv[1];
     std::string input_path = argv[2];
     std::string output_path = argv[3];
     int nthreads = 1;
     bool pack_4bit = false;
+    bool pack_3bit = false;
 
     for(int i = 4; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--pack-4bit") pack_4bit = true;
+        else if (arg == "--pack-3bit") pack_3bit = true;
         else nthreads = std::atoi(argv[i]);
     }
     if (nthreads < 1) nthreads = 1;
+    if (pack_3bit && pack_4bit) {
+        std::cerr << "Cannot use both --pack-4bit and --pack-3bit.\n"; return 1;
+    }
 
     if (mode == "encode") {
-        auto t0 = std::chrono::steady_clock::now();
-
         int fd = open(input_path.c_str(), O_RDONLY);
         if (fd < 0) { std::cerr << "Cannot open " << input_path << "\n"; return 1; }
         struct stat st; fstat(fd, &st);
@@ -173,10 +190,44 @@ int main(int argc, char** argv) {
 
         size_t parsed_count = 0;
         for (size_t i = 0; i < nrecs; i++) if (headers[i].parsed) parsed_count++;
+        
+        // GUARDRAIL: Reject heavily non-Illumina files (e.g. SRR1770413_1)
+        double parse_ratio = (double)parsed_count / nrecs;
+        if (parse_ratio < 0.5) {
+            std::cerr << "[ERROR] Only " << (parse_ratio * 100) << "% of reads matched Illumina formats.\n";
+            std::cerr << "Non-Illumina or unrecognized FASTQ format detected. Aborting.\n";
+            return 1;
+        }
+
+        // ENCODE-TIME VERIFICATION: Ensure strict 1:1 lossless state.
         bool all_parsed = (parsed_count == nrecs);
+        if (all_parsed) {
+            for (size_t i = 0; i < nrecs; i++) {
+                // 1. Check for standard sequential read numbering
+                if (headers[i].read_num != (int64_t)(i + 1)) { all_parsed = false; break; }
+                
+                // 2. Check strict '+' separator (no extra characters)
+                int plus_len; const char* plus = get_line(i * 4 + 2, plus_len);
+                if (plus_len != 1 || plus[0] != '+') { all_parsed = false; break; }
+
+                // 3. Base strictness validation
+                if (pack_4bit || pack_3bit) {
+                    int seq_len; const char* seq = get_line(i * 4 + 1, seq_len);
+                    for (int j = 0; j < seq_len; j++) {
+                        if (pack_4bit && map_base(seq[j]) == 4 && seq[j] != 'N' && seq[j] != 'n') {
+                            all_parsed = false; break; // Ambiguous non-N found
+                        }
+                        if (pack_3bit && map_base_strict(seq[j]) == -1) {
+                            all_parsed = false; break; // Found N or ambiguous base
+                        }
+                    }
+                }
+                if (!all_parsed) break;
+            }
+        }
 
         std::string constant_prefix, constant_instrument, constant_pair_suffix;
-        bool prefix_constant = true, instrument_constant = true, read_num_sequential = true, pair_suffix_constant = true, has_pair_suffix = false;
+        bool prefix_constant = true, instrument_constant = true, pair_suffix_constant = true, has_pair_suffix = false;
         std::unordered_set<std::string> run_vals, fc_vals, lane_vals, tile_vals;
 
         if (all_parsed) {
@@ -188,7 +239,6 @@ int main(int argc, char** argv) {
                 auto& h = headers[i];
                 if (sv(h.prefix_start, h.prefix_len) != constant_prefix) prefix_constant = false;
                 if (sv(h.instr_start, h.instr_len) != constant_instrument) instrument_constant = false;
-                if ((int64_t)(i + 1) != h.read_num) read_num_sequential = false;
                 run_vals.insert(sv(h.run_start, h.run_len)); fc_vals.insert(sv(h.fc_start, h.fc_len));
                 lane_vals.insert(sv(h.lane_start, h.lane_len)); tile_vals.insert(sv(h.tile_start, h.tile_len));
                 if (has_pair_suffix) {
@@ -216,9 +266,9 @@ int main(int argc, char** argv) {
         if (all_parsed) flags |= 1;
         if (prefix_constant) flags |= 2;
         if (instrument_constant) flags |= 4;
-        if (read_num_sequential) flags |= 8;
         if (has_pair_suffix && pair_suffix_constant) flags |= 16;
         if (pack_4bit) flags |= 32; 
+        if (pack_3bit) flags |= 64; 
         fmeta.write((char*)&flags, 1);
 
         auto write_str = [&](const std::string& s) {
@@ -249,14 +299,30 @@ int main(int argc, char** argv) {
                     const char* qual = get_line(i * 4 + 3, qual_len);
 
                     auto append_seq = [&]() {
-                        if (pack_4bit) {
+                        int packed_len = 0;
+                        if (pack_4bit && all_parsed) {
                             for (int j = 0; j < seq_len; j += 2) {
                                 int b1 = map_base(seq[j]);
                                 int b2 = (j + 1 < seq_len) ? map_base(seq[j + 1]) : 0;
                                 buf += (char)('A' + b1 * 5 + b2);
+                                packed_len++;
+                            }
+                        } else if (pack_3bit && all_parsed) {
+                            for (int j = 0; j < seq_len; j += 3) {
+                                int b1 = map_base_strict(seq[j]);
+                                int b2 = (j + 1 < seq_len) ? map_base_strict(seq[j + 1]) : 0;
+                                int b3 = (j + 2 < seq_len) ? map_base_strict(seq[j + 2]) : 0;
+                                buf += b64[(b1 << 4) | (b2 << 2) | b3];
+                                packed_len++;
                             }
                         } else {
                             buf.append(seq, seq_len);
+                            packed_len = seq_len; // raw length
+                        }
+                        
+                        // FIX: Pad chunk length for OpenZL convert_serial_to_num_be16 node
+                        if ((pack_4bit || pack_3bit) && all_parsed && packed_len % 2 != 0) {
+                            buf += 'A';
                         }
                     };
 
@@ -264,6 +330,10 @@ int main(int argc, char** argv) {
                         int hlen; const char* hdr = get_line(i * 4, hlen);
                         buf.append(hdr + 1, hlen - 1); buf += '\t';
                         append_seq(); buf += '\t';
+                        
+                        // Must also capture exact '+' line in raw mode to ensure perfect 1:1
+                        int plus_len; const char* plus = get_line(i * 4 + 2, plus_len);
+                        buf.append(plus, plus_len); buf += '\t';
                         buf.append(qual, qual_len); buf += '\n';
                     } else {
                         auto& h = headers[i];
@@ -295,8 +365,9 @@ int main(int argc, char** argv) {
 
         uint8_t flags; fmeta.read((char*)&flags, 1);
         bool all_parsed = flags & 1, prefix_constant = flags & 2, instrument_constant = flags & 4;
-        bool read_num_sequential = flags & 8, has_pair_suffix = flags & 16;
+        bool has_pair_suffix = flags & 16;
         bool pack_4bit = flags & 32;
+        bool pack_3bit = flags & 64;
 
         auto read_str = [&]() -> std::string { int16_t len; fmeta.read((char*)&len, 2); std::string s(len, '\0'); fmeta.read(&s[0], len); return s; };
         std::string constant_prefix, constant_instrument, constant_pair_suffix;
@@ -359,18 +430,28 @@ int main(int argc, char** argv) {
                 std::string& buf = buffers[t]; buf.reserve((hi - lo) * 160);
                 for (size_t i = lo; i < hi; i++) {
                     int len; const char* line = get_line(i, len);
-                    FieldSlice fields[10]; split_tabs(line, len, fields, 10);
+                    FieldSlice fields[10]; int num_fields = split_tabs(line, len, fields, 10);
 
                     auto decode_seq = [&](const FieldSlice& seq_fs, const FieldSlice& qual_fs) {
-                        if (pack_4bit) {
+                        if (pack_4bit && all_parsed) {
                             int target_len = qual_fs.len; 
                             int bases_decoded = 0;
-                            for (int j = 0; j < seq_fs.len; j++) {
+                            // Target bounds prevent dummy odd-byte pads from being parsed
+                            for (int j = 0; j < seq_fs.len && bases_decoded < target_len; j++) {
                                 int val = seq_fs.s[j] - 'A';
                                 buf += unmap_base(val / 5); bases_decoded++;
                                 if (bases_decoded < target_len) {
                                     buf += unmap_base(val % 5); bases_decoded++;
                                 }
+                            }
+                        } else if (pack_3bit && all_parsed) {
+                            int target_len = qual_fs.len;
+                            int bases_decoded = 0;
+                            for (int j = 0; j < seq_fs.len && bases_decoded < target_len; j++) {
+                                int val = b64_rev[(uint8_t)seq_fs.s[j]];
+                                buf += unmap_base((val >> 4) & 3); bases_decoded++;
+                                if (bases_decoded < target_len) { buf += unmap_base((val >> 2) & 3); bases_decoded++; }
+                                if (bases_decoded < target_len) { buf += unmap_base(val & 3); bases_decoded++; }
                             }
                         } else {
                             buf.append(seq_fs.s, seq_fs.len);
@@ -378,9 +459,11 @@ int main(int argc, char** argv) {
                     };
 
                     if (!all_parsed) {
+                        // Raw mode explicitly restored for 1:1 identical md5 sums
                         buf += '@'; buf.append(fields[0].s, fields[0].len); buf += '\n';
-                        decode_seq(fields[1], fields[2]); buf += "\n+\n";
+                        decode_seq(fields[1], fields[3]); buf += '\n';
                         buf.append(fields[2].s, fields[2].len); buf += '\n';
+                        buf.append(fields[3].s, fields[3].len); buf += '\n';
                     } else {
                         auto to_int = [](const char* s, int l) { int v=0; for(int i=0;i<l;i++) v=v*10+(s[i]-'0'); return v; };
                         buf += '@'; if (prefix_constant) buf += constant_prefix;
