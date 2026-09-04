@@ -1,0 +1,2 @@
+File,Columns,Original_MB,ZSTD_Ratio,BCF_ZSTD_Ratio,OpenZL_Ratio,OpenZL_Time_sec
+chr22.vcf,2513,10692.95,169.9,68.07,210.97,242.49

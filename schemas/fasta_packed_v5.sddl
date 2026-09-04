@@ -1,0 +1,23 @@
+U32 = UInt32LE
+U64 = UInt64LE
+magic        : Byte[4]
+flags        : Byte
+reserved     : Byte[3]
+preamble_len : U32
+num_records  : U32
+n_seqpos     : U64
+n_base       : U64
+n_caseruns   : U64
+n_excruns    : U64
+n_linelens   : U64
+hdr_bytes    : U64
+preamble     : Byte[preamble_len]
+hdr_lens     : U32[num_records]
+rec_nlines   : U32[num_records]
+line_lens    : U32[n_linelens]
+case_runs    : U64[n_caseruns]
+exc_gaps     : U64[n_excruns]
+exc_lens     : U64[n_excruns]
+exc_bytes    : Byte[n_excruns]
+packed2bit   : Byte[(n_base + 3) / 4]
+headers      : Byte[hdr_bytes]

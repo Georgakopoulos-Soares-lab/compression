@@ -1,77 +1,129 @@
-# FASTQ Compression Pipeline
+# FASTQ — `openzl/nyxfqz_v2` (source: `tools/nyx/nyxfqz_v2.cpp`)
 
-## Overview
+Byte-exact FASTQ compression with **one shipped universal Illumina model**. No
+training on your data.
 
-This pipeline compresses Illumina FASTQ files using a **custom parallel preprocessor + trained OpenZL compressor**. Using a **universal compressor** trained on a mixed corpus of two structurally different FASTQ files (ERR9539086 and SRR8899104), it achieves **8.14× compression** on unseen data. By utilizing a new **Base-5 ASCII Packing** algorithm, it easily outperforms standard text compressors while maintaining high structural flexibility.
+## Build
 
-A single-dataset compressor trained on ERR9539086 alone reaches 8.45×, but fails on FASTQ files with different read lengths, tile counts, or quality encodings. The universal approach sacrifices ~6 % ratio for cross-dataset compatibility.
+The FASTQ codec is a self-contained sub-project with its own OpenZL checkout
+(pinned to the same commit as the rest of the repo):
 
-## Pipeline Architecture
+```bash
+bash scripts/fastq/build_nyxfqz.sh   # -> openzl/nyxfqz_v2
+```
+
+## Use
+
+```bash
+MODEL=artifacts/fastq_models/fastq_illumina.zc
+
+# compress:  <model> <in.fastq> <out.nyxz> [threads] [memMB]
+openzl/nyxfqz_v2 compress "$MODEL" reads.fastq reads.nyxz 16 500
+
+# decompress
+openzl/nyxfqz_v2 decompress reads.nyxz restored.fastq
+
+cmp reads.fastq restored.fastq      # byte-identical
+```
+
+`threads` defaults to your core count, `memMB` to 400.
+
+### Read clustering
+
+`NYX_CLUSTER=auto` reorders reads by minimizer before compression and stores a
+permutation so the original order is restored exactly. It is **benefit-gated**:
+a cheap probe runs first and clustering is skipped when it would not help
+(metagenomic or low-coverage data), because the reorder costs time.
+
+```bash
+NYX_CLUSTER=auto openzl/nyxfqz_v2 compress "$MODEL" reads.fastq reads.nyxz 16 500
+```
+
+`NYX_CLUSTER=1` forces it on, `0` off. `NYX_CLUSTER_LOG=1` prints the gate
+decision.
+
+## Memory control
+
+Peak RAM is bounded by a single knob:
+
+```bash
+NYX_MAX_MEM_MB=8000 openzl/nyxfqz_v2 compress "$MODEL" big.fastq big.nyxz 48 500
+```
+
+The worker pool is sized so `reserved buffers + nWorkers × per-worker` fits the
+budget. `NYX_MEM_LOG=1` prints the clamp when it fires.
+
+Design choices that keep the peak down:
+
+- **one shared OpenZL `Compressor`** across all workers (each worker only owns a
+  `CCtx`), instead of every worker deserializing its own copy of the trained graph
+- **the archive is streamed to disk** as frames complete, with a bounded in-order
+  writer, instead of the whole compressed output being assembled in RAM
+- **clustering blocks are capped at 256 MiB**, and the source block is freed as
+  soon as the reordered copy exists
+- **decompression memory-maps the archive** and decodes frames in place — no copy
+  of the archive or of individual frames
+
+## What is preserved
+
+Byte-exact. Read identifiers (including the numeric and text columns they are
+split into), sequence, the `+` line, and quality all round-trip exactly, in the
+original read order, for both fixed- and variable-length reads.
+
+## How it works
 
 ```text
-Original FASTQ ──► fastq_preprocess encode ──► .meta + .tsv ──► OpenZL compress ──► .zl
-                                                                                     │
-Decoded  FASTQ ◄── fastq_preprocess decode ◄── .meta + .tsv ◄── OpenZL decompress ◄──┘
+reads.fastq ─► packFastq (tagged streams) ─► [optional minimizer reorder]
+                                                  │
+                                      per-chunk OpenZL compress ─► reads.nyxz
 ```
 
-### Transforms Applied
+`packFastq` splits records into separate streams — identifiers (further
+decomposed into numeric and text columns), sequence lengths, sequence, quality
+(optionally demultiplexed by preceding byte) — so each gets an appropriate
+codec. Chunks are record-aligned and compress in parallel.
 
-| Field | Transform | Rationale |
-|-------|-----------|-----------|
-| `+` line | **Normalized** | Standardized to just `+\n` to save space. Redundant headers are stripped. |
-| `@PREFIX` | **Dropped** | Constant across file (stored once in `.meta`). |
-| Read number | **Dropped** | Sequential 1…N (reconstructed during decode). |
-| Instrument | **Dropped** | Constant across file (stored once in `.meta`). |
-| Run, Flowcell, Lane, Tile | **Dict** | Low cardinality → integer ID. |
-| X, Y | **Raw** | High cardinality integers, kept as-is. |
-| Pair suffix (`/1`, `/2`) | **Dropped** | Constant across file (stored once in `.meta`). |
-| Sequence | **Base-5 Packed** | Pairs of bases (e.g., `AC`) are mathematically packed into 25 possible combinations mapped to ASCII `A-Y`. Halves payload footprint. |
-| Quality | **Raw** | Phred-encoded string, kept as-is. |
+Archive formats: `NYXZCHK1` (single model), `NYXZCHK2` (per-chunk model picker),
+`NYXZCHK3` (globally clustered, carries the permutation).
 
-The preprocessor uses **mmap** and **multi-threaded** line scanning for maximum throughput.
+## Where it stands against SPRING
 
-## Datasets
+Honest summary, from `results/benchmark_fastq_*.txt`:
 
-### ERR9539086 (NovaSeq, variable-length reads)
-* **Full file:** `ERR9539086.fastq` — 8 378 114 689 bytes (7.8 GiB)
-* **Sample:** First 14 000 000 lines (3.5 M reads)
-* **Read lengths:** Variable (30–95 bp)
+- **Ratio:** we win on some datasets and lose on others. SPRING is a
+  FASTQ-specialist with a stronger quality-stream model; on several fixed-length
+  Illumina sets it compresses better than we do. We are not claiming to beat it
+  across the board.
+- **Speed:** competitive, and faster than SPRING on the larger files.
+- **Scope:** SPRING is FASTQ-only. This is the same framework and the same
+  OpenZL build used for FASTA and VCF.
 
-### SRR8899104 (HiSeq, fixed-length reads)
-* **Full file:** `SRR8899104.fastq` — ~24 GiB
-* **Sample:** First 13 000 000 lines (3.25 M reads)
-* **Read lengths:** Fixed 51 bp
+The design goal for FASTQ is *comparable ratio at better memory and speed*, not
+best-in-class ratio.
 
-## Reproduction Steps
+## Environment variables
 
-### 0) Prerequisites
+| variable | effect |
+|---|---|
+| `NYX_MAX_MEM_MB` | total RAM ceiling for the worker pool (default: 70 % of `MemAvailable`, else 8192) |
+| `NYX_WORKER_MB` | per-worker working-set estimate used by the clamp (default 384) |
+| `NYX_MEM_LOG=1` | log when the pool is clamped |
+| `NYX_CLUSTER=auto\|1\|0` | order-preserving minimizer read clustering |
+| `NYX_CLUSTER_LOG=1` | log the clustering benefit-gate decision |
+| `NYX_CLUSTER_BLOCK_MB` | clustering block size (default: capped at 256) |
+| `NYX_CLEVEL` | override the compression level (default 12, or 19 when clustering) |
+| `NYX_SEQ_ROUTE=zstd` | force the sequence stream to plain zstd |
+| `NYX_MODEL_DIR` | where to look for models |
+
+## Regenerating the model (maintainers)
+
+Not needed to use the tool.
+
 ```bash
-bash scripts/get_openzl.sh   # fetch + patch OpenZL
-bash scripts/build_all.sh    # compile zli, fastq_preprocess, etc.
+bash scripts/fastq/retrain_paper_models.sh    # -> artifacts/fastq_models/fastq_illumina.zc
 ```
 
-### 1) Preprocess (Notice the --pack-4bit flag)
-```bash
-./tools/fastq_preprocess encode \
-    data/fastq/ERR9539086_500M.fastq \
-    data/fastq/ERR9539086_500M_pp \
-    16 \
-    --pack-4bit
-```
-
-*(Follow standard chunking and training steps using the generated TSV and universal model).*
-
-## Benchmark Results (Stampede3 HPC)
-
-Input size: 7.99 GB (`ERR9539086.fastq`, Short Read ~96bp). Benchmarks executed using 16 parallel workers. 
-
-| Tool | Compression Ratio | Time (s) | Validation |
-|------|------:|--------:|:---:|
-| **Genozip (16t)** | **9.01×** | **13.27** | **PASS** |
-| OpenZL (universal, 16p) | 8.14× | 108.60 | PASS* |
-| SPRING (16t) | 7.50× | 192.53 | PASS |
-| xz (16t) | 6.36× | 499.08 | PASS |
-| ZSTD -19 (16t) | 6.14× | 325.43 | PASS |
-| pigz -9 (16t) | 5.08× | 82.52 | PASS |
-
-*\*Note on Validation:* While strict byte-for-byte tools (`filecmp`) may flag the reconstructed file, this is due to the intentional space-saving normalization of the `+` separator line. All biological sequence data and quality scores remain 100% mathematically intact.
+Trains one model on a mixed corpus — variable- and fixed-length reads, half
+packed with clustering and half without — so a single model covers every stream
+shape it will meet at runtime. The script verifies byte-exact round trips before
+it finishes.

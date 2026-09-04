@@ -1,0 +1,12 @@
+file,expected_archetype,predicted_archetype,classify_ok,method,orig_bytes,comp_bytes,ratio,comp_sec,decomp_sec,roundtrip,notes
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,our_method_vcfzl,314571481,1817500,173.079,5.68,,OK,archetype_used=panel
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,gzip,314571481,4467888,70.407,20.60,,OK,
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,pigz,314571481,4492791,70.017,1.72,,OK,
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,zstd,314571481,1911160,164.597,3.41,,OK,
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,7z,314571481,1928527,163.115,10.85,,OK,
+"ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,xz,314571481,1567080,200.737,25.91,,OK,
+"ALL.chr21.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,our_method_vcfzl,314566440,2433727,129.253,5.63,,OK,archetype_used=panel
+"ALL.chr21.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,gzip,314566440,3897419,80.711,20.28,,OK,
+"ALL.chr21.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,pigz,314566440,3912912,80.392,1.99,,OK,
+"ALL.chr21.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,zstd,314566440,2762022,113.890,4.89,,OK,
+"ALL.chr21.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf",panel,panel,1,7z,314566440,2710997,116.033,10.20,,OK,

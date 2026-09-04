@@ -1,92 +1,115 @@
-# VCF Compression Pipeline
+# VCF — `scripts/vcf/vcfzl`
 
-## Overview
+Byte-exact VCF compression with **8 shipped archetype models** and automatic
+archetype detection. No training on your data.
 
-This pipeline compresses VCF (Variant Call Format) files using a **header/body split preprocessor + trained OpenZL CSV profiler**. On the full 1000 Genomes chr22 VCF (10.69 GB body, 2 513 columns), it achieves an industry-leading **212.57× compression** — outperforming highly optimized genomic tools like Genozip (208.18×) and standard tools like xz (171.57×) — using 16 parallel workers.
+## Use
 
-## Pipeline Architecture
-
-```text
-VCF                                                 .vcfbody.zl (one per part)
- │                                                       │
- ├── vcf_preprocessing ──► header.vcf                    │
- │                     ──► body_parts/part_*.vcfbody     │
- │                     ──► manifest.json                 │
- │                                                       │
- └── zli compress (--compressor csv_tab_trained.zlc) ────┘
-                                                         │
- Reassembled VCF ◄── vcf_postprocess ◄── zli decompress ◄┘
-```
-
-1. **Preprocessing** (`vcf_preprocessing`): Separates the VCF into:
-   - `header.vcf` — all `##` meta-information and `#CHROM` header lines (stored as-is)
-   - `body_parts/part_NNNNNN.vcfbody` — line-safe chunks of data rows (~40 MiB each)
-   - `manifest.json` — metadata for reassembly (file list, byte sizes)
-   *Note: The preprocessor uses safety latches (`--delta-pos`, `--dict-info`) to guarantee 100% byte-for-byte lossless integrity.*
-
-2. **Compression** (`zli compress`): Each `.vcfbody` chunk is compressed independently using a **trained CSV tab profiler** that learned column-specific entropy models from the genotype data.
-
-3. **Decompression + Reassembly** (`vcf_postprocess`): Decompresses chunks and concatenates header + body parts back into the original VCF (byte-identical).
-
-## Why This Approach Works
-
-The 1000 Genomes chr22 VCF has **2 504 sample columns** containing highly repetitive genotype strings (`0|0`, `0|1`, `1|1`, `./.`). The trained CSV profiler learns per-column entropy models that exploit this repetition far more efficiently than byte-level compressors.
-
-## Dataset
-
-| Property | Value |
-|----------|-------|
-| **Source** | 1000 Genomes Project, Phase 3, chromosome 22 |
-| **URL** | `https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz` |
-| **Full file** | `10.69 GB uncompressed (`ALL.chr22.vcf`) |
-| **Body columns** | 2 513 (9 fixed + 2 504 sample genotypes) |
-| **Parts** | Chunked dynamically into ~40 MiB pieces |
-
-## Reproduction Steps
-
-### 0) Prerequisites
 ```bash
-bash scripts/get_openzl.sh     # fetch OpenZL source
-bash scripts/patch_openzl.sh   # raise limits for wide CSV (2500+ columns)
-bash scripts/build_all.sh      # compile zli + all preprocessors
+# compress — the archetype is detected from the file's structure
+scripts/vcf/vcfzl compress calls.vcf calls.vcfz
+
+# compress and prove the round trip in the same run
+scripts/vcf/vcfzl compress calls.vcf calls.vcfz --verify
+
+# decompress
+scripts/vcf/vcfzl decompress calls.vcfz restored.vcf
+
+# ask what archetype a file is, without compressing
+scripts/vcf/vcfzl classify calls.vcf
+VCFZL_CLASSIFY_DEBUG=1 scripts/vcf/vcfzl classify calls.vcf   # + the evidence
+
+# list the shipped archetypes
+scripts/vcf/vcfzl archetypes
+
+# inspect an archive
+scripts/vcf/vcfzl inspect calls.vcfz
 ```
 
-### 1) Preprocess (Notice the safety flags)
+Options: `--threads N`, `--archetype <id|auto>` (default `auto`), `--verify`.
+
+Input may be plain `.vcf` or gzip/bgzip-compressed (`.vcf.gz`, `.bgz`) —
+detected by magic bytes, not by file extension.
+
+## The 8 archetypes
+
+One trained model per archetype, in `artifacts/vcf_models/<id>.zlc`. The
+registry (`artifacts/vcf_models/archetypes.tsv`) records the rule, the training
+source and whether that source is real or derived.
+
+| id | what it is | detected by | typical sources |
+|---|---|---|---|
+| `sites-annotated` | sites-only, annotation-heavy INFO | no FORMAT column; `CLNSIG`/`ANN=`/`CSQ=`/`GENEINFO`/`COSMIC` on >5 % of rows, or outnumbering frequency keys | ClinVar, COSMIC, VEP/SnpEff output, CIViC |
+| `sites-frequency` | sites-only, allele-frequency INFO | no FORMAT column; INFO dominated by `AF`/`AC`/`AN`/`gnomAD`/`TOPMED` | gnomAD sites, dbSNP, 1000G sites-only |
+| `single-sample` | one germline sample | exactly 1 sample column, no gVCF or somatic evidence | GIAB HG002/3/4, GATK / DeepVariant / DRAGEN single-sample |
+| `gvcf` | single sample with reference blocks | `##ALT=<ID=NON_REF>` or HaplotypeCaller `-ERC` in the header, or >10 % of rows carry `<NON_REF>`, or >50 % carry `END=` | GATK HaplotypeCaller `-ERC GVCF`, DeepVariant gVCF |
+| `somatic` | tumour/normal call set | somatic-caller or `##SAMPLE` header, `SOMATIC` INFO on >20 % of rows, or a 2-sample tumour/normal-named pair | SEQC2 HCC1395, Mutect2, Strelka2, VarScan2 |
+| `family-trio` | small pedigree | 2–20 sample columns | GIAB Ashkenazi trio, 1000G trios |
+| `cohort` | joint-genotyped cohort | 21–999 sample columns | GTEx, 1000G subsets |
+| `panel` | large reference panel | ≥1000 sample columns | 1000G phase 3, HGDP |
+
+### The classifier is structural, not a lookup
+
+`vcfzl classify` reads the **complete header plus the first 20 000 data rows**
+and applies the rules above. It never looks at the filename and never consults a
+list of known files, so a VCF it has never seen is bucketed the same way as the
+training sources.
+
+`VCFZL_CLASSIFY_DEBUG=1` prints the evidence:
+
+```
+classify: cohort  [ncol=109 nsamp=100 rows=20000 nonref=0 end=13 som_info=0
+                   som_hdr=0 gvcf_hdr=0 tn=0 info_defs=27 info_used=22 anno=0 freq=20000]
+```
+
+### If the guess is wrong
+
+It costs ratio, never correctness. Every body part is compressed with a
+three-step fallback — **archetype model → `--profile csv` (tab) → `--profile serial`** —
+so a part the model cannot handle still compresses losslessly. The count of
+parts that needed a fallback is stored in the archive and shown by
+`vcfzl inspect`.
+
+You can also force a choice: `--archetype panel`.
+
+## Archive format
+
+`.vcfz` is a tar containing:
+
+```
+FORMAT          version tag
+checksum        SHA-256 over the compressed parts + header + manifest
+manifest.json   part list and sizes
+archetype       the id used
+header.vcf      the ## and #CHROM lines, verbatim
+zl/*.zl         compressed body parts
+fallback_parts  how many parts used a fallback profile
+```
+
+`vcfzl decompress` verifies the format tag and checksum before decoding.
+
+## Performance
+
+`scripts/vcf/vcfzl` beats `gzip -9`, `zstd -19 --long=27` and
+`xz -9e --block-size=192MiB` on every archetype we have measured; the margin is
+largest on the genotype-heavy archetypes (`panel`, `cohort`) where column-wise
+dispatch pays off most. Current numbers live in
+`results/benchmark_vcfzl_*.csv`.
+
+Auto-detect accuracy over a 26-file validation corpus (3+ real files per
+archetype, built by `scripts/vcf/get_corpus.sh`) is reported by
+`batch_files/benchmark_vcf_corpus.slurm` into `results/vcf_corpus_*.csv`.
+
+## Regenerating the models (maintainers)
+
+Not needed to use the tool.
+
 ```bash
-./tools/vcf_preprocessing data/vcf/ALL.chr22.vcf out/vcf_pack \
-    --threads 16 --max-chunk-mib 40 --delta-pos --dict-info --force
-# → out/vcf_pack/header.vcf           
-# → out/vcf_pack/body_parts/part_*.vcfbody  
-# → out/vcf_pack/manifest.json
+bash scripts/vcf/get_archetype_data.sh          # fetch/derive the training sources
+bash scripts/vcf/train_vcf_library.sh --force   # -> artifacts/vcf_models/*.zlc
+scripts/vcf/vcfzl archetypes                    # confirm 8/8 ready
 ```
 
-*(Follow standard chunking, training, and compression steps using the pre-trained `artifacts/csv_tab_trained.zlc` model).*
-
-### 2) Decompress + reassemble (round-trip)
-```bash
-# Decompress each part
-for f in out/vcf_pack/zl/*.zl; do
-    base=$(basename "$f" .zl)
-    ./openzl/zli decompress "$f" \
-        --output "out/vcf_pack/body_parts/${base}.dec" --force &
-done
-wait
-
-# Reassemble header + body parts into a single VCF
-./tools/vcf_postprocess out/vcf_pack out/vcf_reconstructed.vcf \
-    --threads 16 --chunk-suffix .dec
-```
-
-## Benchmark Results (Stampede3 HPC)
-
-Input size: 10.69 GB (`ALL.chr22.vcf`, 2 513 columns, Phased). Benchmarks executed using 16 parallel workers. Ratio = original file size / compressed size.
-
-| Tool | Compression Ratio | Time (s) | Validation |
-|------|------:|--------:|:---:|
-| **OpenZL (trained CSV, 16p)** | **212.57×** | **267.49** | **PASS** |
-| Genozip (16t) | 208.18× | 29.73 | PASS |
-| xz (16t) | 171.57× | 41.92 | PASS |
-| ZSTD -19 (16t) | 169.90× | 41.83 | PASS |
-| pigz -9 (16t) | 70.40× | 58.52 | PASS |
-
-OpenZL achieves the highest compression ratio in its class for wide, phased VCF matrices, mathematically guaranteeing exact data reconstruction.
+Each archetype trains several OpenZL profiles (`csv`, `lz`) and keeps whichever
+compresses that archetype's own chunks smallest; the winner is recorded in
+`artifacts/vcf_models/<id>.profile`.

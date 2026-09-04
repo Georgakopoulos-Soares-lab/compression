@@ -1,0 +1,58 @@
+U32 = UInt32LE
+U16 = UInt16LE
+
+# HARC-style packed FASTA schema (v2, columnar)
+# Magic "HRC2"
+#
+# Produced by tools/harc_preprocessor.cpp. Pseudo-reads are chunked from
+# each FASTA record (read_len bases, last read per record may be shorter),
+# greedily reordered by minimizer similarity, then each read is encoded as
+# either RAW (4-bit packed) or DELTA against the immediately preceding read
+# in the new order: a literal prefix, a copied+patched overlap aligned via
+# seed-and-extend, and a literal suffix. See harc_preprocessor.cpp for the
+# full field-by-field rationale.
+#
+# This is deliberately columnar (flags/lengths/pools kept as separate
+# streams rather than interleaved per-read records) so OpenZL's schema-aware
+# training can model each stream independently -- the same design principle
+# fasta_packed.sddl already uses by splitting headers from sequences.
+
+magic       : Byte[4]
+num_records : U32
+
+hdr_offsets : U32[num_records + 1]
+hdr_total   : U32
+hdr_pad     : U32
+headers     : Byte[hdr_total + hdr_pad]
+
+read_len         : U32
+num_reads        : U32
+rec_read_offsets : U32[num_records + 1]   # which reads belong to which record, ORIGINAL order
+read_lengths     : U32[num_reads]          # length in bases, ORIGINAL order
+order_to_orig    : U32[num_reads]          # order_to_orig[i] = original read index at reordered position i
+
+# --- everything below is in REORDERED order ---
+flags           : Byte[num_reads]   # 0 = RAW, 1 = DELTA
+ov_start_cur    : U16[num_reads]    # DELTA only: overlap start within this read (0 for RAW)
+ov_start_prev   : U16[num_reads]    # DELTA only: overlap start within the previous read (0 for RAW)
+ov_len          : U16[num_reads]    # DELTA only: overlap length (0 for RAW)
+mismatch_counts : U16[num_reads]    # mismatches within the overlap (0 for RAW)
+
+raw_pool_total    : U32
+raw_pool_pad      : U32
+prefix_pool_total : U32
+prefix_pool_pad   : U32
+suffix_pool_total : U32
+suffix_pool_pad   : U32
+mpos_total        : U32
+mpos_pad          : U32
+mbase_total       : U32
+mbase_pad         : U32
+
+raw_pool    : Byte[raw_pool_total + raw_pool_pad]        # 4-bit packed bases, RAW reads only
+prefix_pool : Byte[prefix_pool_total + prefix_pool_pad]  # 4-bit packed literal prefix, DELTA reads only
+suffix_pool : Byte[suffix_pool_total + suffix_pool_pad]  # 4-bit packed literal suffix, DELTA reads only
+mismatch_positions : Byte[mpos_total + mpos_pad]         # U16LE offsets relative to overlap start
+mismatch_bases     : Byte[mbase_total + mbase_pad]       # 4-bit packed replacement bases
+
+: Byte[_rem]

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# fastazl — byte-exact FASTA compression with the shipped universal OpenZL model.
+#
+#   fastazl compress   <in.fasta> <out.fazl> [--threads N] [--verify]
+#   fastazl decompress <in.fazl>  <out.fasta> [--threads N]
+#   fastazl info       <in.fazl>
+#
+# Pipeline: biocompress_preprocessor packs the FASTA into the FAV5 container
+# (2-bit ACGT + RLE case mask + RLE exception runs + explicit line layout), each
+# chunk is compressed with artifacts/fasta_model.zlc, and the pieces are stored
+# in a tar. Decoding runs zli decompress + fasta_postprocess.
+#
+# Losslessness: soft-masking, IUPAC codes, arbitrary line widths, CRLF and a
+# missing trailing newline are all preserved. Any chunk the trained model cannot
+# handle falls back to `zli compress --profile serial`, so the round trip is
+# always byte-exact. `--verify` proves it by decoding and comparing.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ZLI="${ZLI:-$HERE/openzl/zli}"
+PRE="${FASTA_PRE:-$HERE/tools/biocompress_preprocessor}"
+POST="${FASTA_POST:-$HERE/tools/fasta_postprocess}"
+MODEL="${FASTA_MODEL:-$HERE/artifacts/fasta_model.zlc}"
+SDDL="${FASTA_SDDL:-$HERE/schemas/fasta_packed_v5.sddl}"
+FAZL_VERSION="fazl1"
+
+die() { echo "fastazl: $*" >&2; exit 1; }
+require() {
+  [ -x "$ZLI" ]  || die "openzl/zli not built — run scripts/build_all.sh"
+  [ -x "$PRE" ]  || die "tools/biocompress_preprocessor not built — run scripts/build_all.sh"
+  [ -x "$POST" ] || die "tools/fasta_postprocess not built — run scripts/build_all.sh"
+}
+
+cmd_compress() {
+  local in="" out="" threads="${SLURM_CPUS_PER_TASK:-$(nproc)}" verify=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --threads) threads="$2"; shift 2;;
+      --verify)  verify=1; shift;;
+      -*)        die "unknown option: $1";;
+      *)         if [ -z "$in" ]; then in="$1"; else out="$1"; fi; shift;;
+    esac
+  done
+  [ -n "$in" ] && [ -n "$out" ] || die "usage: fastazl compress <in.fasta> <out.fazl> [--threads N] [--verify]"
+  [ -f "$in" ] || die "no such file: $in"
+  require
+
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  mkdir -p "$work/chunks"
+
+  echo "fastazl: packing (FAV5, $threads threads)..." >&2
+  "$PRE" "$in" "$work/chunks" "$threads" fasta_packed >/dev/null 2>&1 \
+    || die "preprocessing failed on $in"
+
+  local comp="-" prof
+  prof="$(cat "${MODEL%.zlc}.profile" 2>/dev/null)"
+  if [ "$prof" = sddl ] && [ -s "$SDDL" ]; then comp="sddl:$SDDL"
+  elif [ -s "$MODEL" ]; then comp="$MODEL"
+  else echo "fastazl: no model at $MODEL — using the serial profile" >&2
+  fi
+  echo "fastazl: compressing chunks..." >&2
+  : > "$work/fb.count"
+  bash "$HERE/scripts/fasta_compress_chunks.sh" "$ZLI" "$work/chunks" "$threads" "$comp" "$work/fb.count" \
+    || die "chunk compression failed"
+
+  local nbin nzl
+  nbin=$(find "$work/chunks" -maxdepth 1 -name '*.fasta_packed.bin'    | wc -l)
+  nzl=$( find "$work/chunks" -maxdepth 1 -name '*.fasta_packed.bin.zl' | wc -l)
+  [ "$nzl" -eq "$nbin" ] || die "only $nzl/$nbin chunks compressed"
+  rm -f "$work/chunks"/*.fasta_packed.bin
+
+  printf '%s\n' "$FAZL_VERSION" > "$work/FORMAT"
+  printf 'chunks=%s\nfallback_parts=%s\nmodel=%s\n' \
+    "$nzl" "$(wc -l < "$work/fb.count" | tr -d ' ')" "$(basename "$comp")" > "$work/manifest"
+  tar -C "$work" -cf "$out" FORMAT manifest chunks || die "could not write $out"
+
+  local isz osz; isz=$(stat -c%s "$in"); osz=$(stat -c%s "$out")
+  echo "fastazl: done  $(awk -v b="$isz" 'BEGIN{printf "%.1f MB", b/1e6}') -> $(awk -v b="$osz" 'BEGIN{printf "%.1f MB", b/1e6}')  ($(awk -v a="$isz" -v b="$osz" 'BEGIN{printf "%.3fx", a/b}'))" >&2
+
+  if [ "$verify" = 1 ]; then
+    local back="$work/verify.fasta"
+    cmd_decompress "$out" "$back" --threads "$threads" >/dev/null 2>&1 \
+      || die "--verify: decompression failed"
+    cmp -s "$in" "$back" || die "--verify: ROUND TRIP MISMATCH"
+    echo "fastazl: --verify OK (byte-exact round trip confirmed)" >&2
+  fi
+}
+
+cmd_decompress() {
+  local in="" out="" threads="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --threads) threads="$2"; shift 2;;
+      -*)        die "unknown option: $1";;
+      *)         if [ -z "$in" ]; then in="$1"; else out="$1"; fi; shift;;
+    esac
+  done
+  [ -n "$in" ] && [ -n "$out" ] || die "usage: fastazl decompress <in.fazl> <out.fasta> [--threads N]"
+  [ -f "$in" ] || die "no such file: $in"
+  require
+
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  tar -C "$work" -xf "$in" || die "not a fastazl archive: $in"
+  [ "$(cat "$work/FORMAT" 2>/dev/null)" = "$FAZL_VERSION" ] \
+    || die "unsupported archive version: $(cat "$work/FORMAT" 2>/dev/null)"
+
+  find "$work/chunks" -maxdepth 1 -type f -name '*.zl' -print0 \
+    | xargs -0 -P "$threads" -I{} "$ZLI" decompress "{}" --output "{}.dec" --force >/dev/null 2>&1 \
+    || die "chunk decompression failed"
+  "$POST" "$work/chunks" "$out" --suffix .fasta_packed.bin.zl.dec >/dev/null 2>&1 \
+    || die "reassembly failed"
+  echo "fastazl: wrote $out ($(stat -c%s "$out") bytes)" >&2
+}
+
+cmd_info() {
+  [ $# -eq 1 ] || die "usage: fastazl info <in.fazl>"
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  tar -C "$work" -xf "$1" FORMAT manifest 2>/dev/null || die "not a fastazl archive: $1"
+  echo "format: $(cat "$work/FORMAT")"
+  cat "$work/manifest"
+  echo "size:   $(stat -c%s "$1") bytes"
+}
+
+sub="${1:-}"; shift 2>/dev/null || true
+case "$sub" in
+  compress)   cmd_compress "$@";;
+  decompress) cmd_decompress "$@";;
+  info)       cmd_info "$@";;
+  ""|-h|--help|help)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//';;
+  *) die "unknown command '$sub' (try: compress decompress info)";;
+esac

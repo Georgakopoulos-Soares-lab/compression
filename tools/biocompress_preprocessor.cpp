@@ -428,112 +428,155 @@ void process_fasta_chunk(const char* start, const char* end, const std::string& 
 }
 
 // ============================================================================
-// FASTA Packed Processor (FAV4 - 4-bit packed bases)
+// FASTA Packed Processor (FAV5 - LOSSLESS)
+// ----------------------------------------------------------------------------
+// FAV4 was lossy: it case-folded (a->A), collapsed every non-ACGTN byte to N,
+// dropped '\r', and stored no line layout, so the original FASTA could not be
+// reconstructed. FAV5 is byte-exact. Each chunk decodes to its exact input
+// range (chunks are cut on record boundaries, so concatenating the decoded
+// chunks in index order reproduces the file). Reconstruction: tools/fasta_postprocess.
+//
+// Container (little-endian, no padding). All RLE arrays are length-prefixed by
+// the header counts. Exceptions (N runs, IUPAC codes, '\r', gaps, ...) are
+// run-length encoded so long N stretches cost ~24 bytes each, not O(len).
+//   "FAV5"  magic
+//   u8   flags            bit0 = this range ends with '\n'
+//   u8[3] reserved
+//   u32  preamble_len
+//   u32  num_records
+//   u64  n_seqpos         total sequence positions (bases + exception bytes)
+//   u64  n_base           positions whose byte is [ACGTacgt]
+//   u64  n_caseruns       upper/lower RLE over base positions (first run = upper)
+//   u64  n_excruns        exception runs
+//   u64  n_linelens       == sum(rec_nlines)
+//   u64  hdr_bytes        == sum(hdr_lens)
+//   Byte[preamble_len]                preamble
+//   u32[num_records]                  hdr_lens    (header text after '>', excl '\n')
+//   u32[num_records]                  rec_nlines
+//   u32[n_linelens]                   line_lens   (raw bytes per sequence line, no '\n')
+//   u64[n_caseruns]                   case_runs
+//   u64[n_excruns]                    exc_gaps    (base+exc positions since prev run end)
+//   u64[n_excruns]                    exc_lens
+//   Byte[n_excruns]                   exc_bytes   (the repeated literal byte)
+//   Byte[ceil(n_base/4)]              packed2bit  (A=0 C=1 G=2 T=3, low bits first)
+//   Byte[hdr_bytes]                   headers
 // ============================================================================
 
+static inline int base_code(char c) {
+    switch (c) {
+        case 'A': case 'a': return 0;
+        case 'C': case 'c': return 1;
+        case 'G': case 'g': return 2;
+        case 'T': case 't': return 3;
+        default: return -1;
+    }
+}
+static inline bool is_lower_base(char c) { return c >= 'a' && c <= 'z'; }
+
+template <class T>
+static void put_le(std::vector<uint8_t>& b, T v) {
+    for (size_t i = 0; i < sizeof(T); i++) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
+}
+
 void process_fasta_packed_chunk(const char* start, const char* end, const std::string& output_path) {
-    std::vector<uint32_t> hdr_offsets = {0};
-    std::vector<uint32_t> seq_offsets = {0};
-    std::vector<uint32_t> seq_lengths;
+    std::vector<uint8_t>  headers, exc_bytes, packed2bit;
+    std::vector<uint32_t> hdr_lens, rec_nlines, line_lens;
+    std::vector<uint64_t> case_runs, exc_gaps, exc_lens;
 
-    std::vector<char> hdrs;
-    std::vector<char> seqs;
+    // case RLE
+    bool have_case = false, cur_lower = false;
+    uint64_t cur_run = 0;
+    auto case_push = [&](bool lower) {
+        if (!have_case) { if (lower) case_runs.push_back(0); have_case = true; cur_lower = lower; cur_run = 1; return; }
+        if (lower == cur_lower) cur_run++;
+        else { case_runs.push_back(cur_run); cur_lower = lower; cur_run = 1; }
+    };
+    // exception RLE
+    bool exc_active = false; uint8_t exc_byte = 0; uint64_t exc_start = 0, exc_len = 0, prev_exc_end = 0;
+    auto exc_flush = [&]() {
+        if (!exc_active) return;
+        exc_gaps.push_back(exc_start - prev_exc_end);
+        exc_lens.push_back(exc_len);
+        exc_bytes.push_back(exc_byte);
+        prev_exc_end = exc_start + exc_len;
+        exc_active = false;
+    };
+    // 2-bit packer
+    int pend_n = 0; uint8_t pend_byte = 0;
+    auto pack_push = [&](int code) {
+        pend_byte |= static_cast<uint8_t>((code & 3) << (2 * pend_n));
+        if (++pend_n == 4) { packed2bit.push_back(pend_byte); pend_byte = 0; pend_n = 0; }
+    };
 
-    uint32_t current_seq_len = 0;
-    int pending_base = -1; // -1 == none pending
+    uint64_t seqpos = 0, n_base = 0;
 
-    const char* cursor = start;
+    const char* first_gt = static_cast<const char*>(memchr(start, '>', end - start));
+    const char* preamble_end = first_gt ? first_gt : end;
+    std::vector<uint8_t> preamble(reinterpret_cast<const uint8_t*>(start),
+                                 reinterpret_cast<const uint8_t*>(preamble_end));
+    const char* cursor = preamble_end;
 
-    while (cursor < end) {
-        if (*cursor == '>') {
-            // Finish previous record if any
-            if (hdr_offsets.size() > 1) {
-                if (pending_base != -1) {
-                    uint8_t b = static_cast<uint8_t>(pending_base << 4); // pad low nibble as A (0)
-                    seqs.push_back(static_cast<char>(b));
-                    pending_base = -1;
-                }
-                seq_offsets.push_back(static_cast<uint32_t>(seqs.size()));
-                seq_lengths.push_back(current_seq_len);
-                current_seq_len = 0;
-            }
+    while (cursor < end && *cursor == '>') {
+        const char* nl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+        const char* hdr_end = nl ? nl : end;
+        headers.insert(headers.end(), cursor + 1, hdr_end);
+        hdr_lens.push_back(static_cast<uint32_t>(hdr_end - (cursor + 1)));
+        cursor = nl ? nl + 1 : end;
 
-            const char* line_end = (const char*)memchr(cursor, '\n', end - cursor);
-            if (!line_end) line_end = end;
-
-            // store header without '>'
-            hdrs.insert(hdrs.end(), cursor + 1, line_end);
-            hdr_offsets.push_back(static_cast<uint32_t>(hdrs.size()));
-
-            cursor = line_end + 1;
-        } else {
-            const char* line_end = (const char*)memchr(cursor, '\n', end - cursor);
-            if (!line_end) line_end = end;
-
+        uint32_t nlines = 0;
+        while (cursor < end && *cursor != '>') {
+            const char* lnl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+            const char* line_end = lnl ? lnl : end;
+            line_lens.push_back(static_cast<uint32_t>(line_end - cursor));
             for (const char* p = cursor; p < line_end; ++p) {
-                char c = *p;
-                if (c == '\n' || c == '\r') continue;
-
-                uint8_t val = pack_base(c) & 0xF;
-                ++current_seq_len;
-
-                if (pending_base == -1) {
-                    pending_base = val;
+                int code = base_code(*p);
+                if (code < 0) {
+                    uint8_t c = static_cast<uint8_t>(*p);
+                    if (exc_active && c == exc_byte && seqpos == exc_start + exc_len) exc_len++;
+                    else { exc_flush(); exc_active = true; exc_byte = c; exc_start = seqpos; exc_len = 1; }
                 } else {
-                    uint8_t b = static_cast<uint8_t>((pending_base << 4) | val);
-                    seqs.push_back(static_cast<char>(b));
-                    pending_base = -1;
+                    case_push(is_lower_base(*p));
+                    pack_push(code);
+                    n_base++;
                 }
+                seqpos++;
             }
-
-            cursor = line_end + 1;
+            nlines++;
+            cursor = lnl ? lnl + 1 : end;
         }
+        rec_nlines.push_back(nlines);
     }
 
-    // Finish last record
-    if (hdr_offsets.size() > 1) {
-        if (pending_base != -1) {
-            uint8_t b = static_cast<uint8_t>(pending_base << 4);
-            seqs.push_back(static_cast<char>(b));
-            pending_base = -1;
-        }
-        seq_offsets.push_back(static_cast<uint32_t>(seqs.size()));
-        seq_lengths.push_back(current_seq_len);
-    }
+    exc_flush();
+    if (have_case) case_runs.push_back(cur_run);
+    if (pend_n) packed2bit.push_back(pend_byte);
+
+    std::vector<uint8_t> buf;
+    buf.insert(buf.end(), {'F','A','V','5'});
+    buf.push_back((end > start && end[-1] == '\n') ? 1u : 0u);
+    buf.insert(buf.end(), {0,0,0});
+    put_le<uint32_t>(buf, static_cast<uint32_t>(preamble.size()));
+    put_le<uint32_t>(buf, static_cast<uint32_t>(hdr_lens.size()));
+    put_le<uint64_t>(buf, seqpos);
+    put_le<uint64_t>(buf, n_base);
+    put_le<uint64_t>(buf, static_cast<uint64_t>(case_runs.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(exc_gaps.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(line_lens.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(headers.size()));
+
+    buf.insert(buf.end(), preamble.begin(), preamble.end());
+    for (uint32_t v : hdr_lens)   put_le<uint32_t>(buf, v);
+    for (uint32_t v : rec_nlines) put_le<uint32_t>(buf, v);
+    for (uint32_t v : line_lens)  put_le<uint32_t>(buf, v);
+    for (uint64_t v : case_runs)  put_le<uint64_t>(buf, v);
+    for (uint64_t v : exc_gaps)   put_le<uint64_t>(buf, v);
+    for (uint64_t v : exc_lens)   put_le<uint64_t>(buf, v);
+    buf.insert(buf.end(), exc_bytes.begin(), exc_bytes.end());
+    buf.insert(buf.end(), packed2bit.begin(), packed2bit.end());
+    buf.insert(buf.end(), headers.begin(), headers.end());
 
     std::ofstream out(output_path, std::ios::binary);
-    out.write("FAV4", 4);
-
-    uint32_t num_records = static_cast<uint32_t>(seq_lengths.size());
-    write_u32(out, num_records);
-
-    // Offsets (num_records + 1 each)
-    out.write(reinterpret_cast<const char*>(hdr_offsets.data()), hdr_offsets.size() * 4);
-    out.write(reinterpret_cast<const char*>(seq_offsets.data()), seq_offsets.size() * 4);
-
-    // Original sequence lengths
-    if (!seq_lengths.empty()) {
-        out.write(reinterpret_cast<const char*>(seq_lengths.data()), seq_lengths.size() * 4);
-    }
-
-    uint32_t hdr_total = static_cast<uint32_t>(hdrs.size());
-    uint32_t seq_total = static_cast<uint32_t>(seqs.size());
-
-    write_u32(out, hdr_total);
-    write_u32(out, seq_total);
-
-    uint32_t hdr_pad = (4 - (hdr_total % 4)) % 4;
-    uint32_t seq_pad = (4 - (seq_total % 4)) % 4;
-
-    write_u32(out, hdr_pad);
-    write_u32(out, seq_pad);
-
-    out.write(hdrs.data(), hdrs.size());
-    pad_stream(out, hdrs.size(), 4);
-
-    out.write(seqs.data(), seqs.size());
-    pad_stream(out, seqs.size(), 4);
-
+    out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
     out.close();
 }
 

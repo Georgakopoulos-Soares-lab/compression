@@ -121,5 +121,5 @@ zl_bytes = sum(os.path.getsize(p) for p in zl)
 print('parts', len(raw), 'compressed', len(zl))
 print('raw_bytes', raw_bytes)
 print('zl_bytes', zl_bytes)
-print('ratio', (raw_bytes / zl_bytes) if zl_bytes else None)
+print('ratio', round(raw_bytes / zl_bytes, 2) if zl_bytes else None)
 PY

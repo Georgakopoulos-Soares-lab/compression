@@ -3,8 +3,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 1) Ensure OpenZL exists
+# Serialize concurrent runs (FASTA + VCF benchmark jobs share $HERE/openzl and
+# would otherwise race on `git checkout` / `sed -i` / `make`).
+exec 9>"$HERE/.build_all.lock"
+flock 9
+
+# 1) Ensure OpenZL exists (pinned commit) and apply the wide-CSV limit patch.
 "$HERE/scripts/get_openzl.sh"
+PATCH_OPENZL_BUILD=0 "$HERE/scripts/patch_openzl.sh"   # patch only; build happens next
 
 # 2) Build OpenZL (produces ./openzl/zli)
 cd "$HERE/openzl"
@@ -31,6 +37,11 @@ g++ -O3 -std=c++17 -pthread \
   -o "$HERE/tools/biocompress_preprocessor" \
   "$HERE/tools/biocompress_preprocessor.cpp"
 
+# 3b) FASTA decoder (inverse of the FAV5 packed format -> exact original FASTA)
+g++ -O2 -std=c++17 \
+  -o "$HERE/tools/fasta_postprocess" \
+  "$HERE/tools/fasta_postprocess.cpp"
+
 # 4) Build the BED preprocessor
 g++ -O2 -std=c++17 \
   -o "$HERE/tools/bed_preprocess" \
@@ -51,10 +62,22 @@ g++ -O2 -std=c++17 -pthread \
   -o "$HERE/tools/vcf_postprocess" \
   "$HERE/tools/vcf_postprocess.cpp"
 
+# 8) Build the VCF field-aware codec (reversible per-column decomposition)
+g++ -O3 -std=c++17 -pthread \
+  -o "$HERE/tools/vcf_field_codec" \
+  "$HERE/tools/vcf_field_codec.cpp"
+
+# 8b) Build the VCF genotype symbol codec (reversible GT -> 1-byte coding)
+g++ -O3 -std=c++17 \
+  -o "$HERE/tools/vcf_gtcodec" \
+  "$HERE/tools/vcf_gtcodec.cpp"
+
 echo "Build OK:"
 echo "  $HERE/openzl/zli"
 echo "  $HERE/tools/biocompress_preprocessor"
+echo "  $HERE/tools/fasta_postprocess"
 echo "  $HERE/tools/bed_preprocess"
 echo "  $HERE/tools/fastq_preprocess"
 echo "  $HERE/tools/vcf_preprocessing"
 echo "  $HERE/tools/vcf_postprocess"
+echo "  $HERE/tools/vcf_field_codec"

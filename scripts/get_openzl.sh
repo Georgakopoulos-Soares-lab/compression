@@ -5,7 +5,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OPENZL_DIR="${OPENZL_DIR:-$HERE/openzl}"
 OPENZL_REPO="${OPENZL_REPO:-https://github.com/facebook/openzl}"
 # Pinned to the commit currently used in this workspace.
-OPENZL_COMMIT="${OPENZL_COMMIT:-e40fe9f314283047147d573d113fa7d17eabf7ac}"
+# d262127 = OpenZL 0.2.5 (dev, 2026-08-28). All three format pipelines
+# (FASTA / VCF / FASTQ) are aligned on this exact commit for the paper.
+OPENZL_COMMIT="${OPENZL_COMMIT:-d26212728c46f3e27cd77c5c7b962cd6d375ff4d}"
 
 if [ -d "$OPENZL_DIR/.git" ]; then
   echo "OpenZL already present: $OPENZL_DIR"
