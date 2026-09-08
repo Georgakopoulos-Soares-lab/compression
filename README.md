@@ -117,17 +117,26 @@ Every benchmark verifies a byte-exact round trip per file and reports it in a
 ## Repository layout
 
 ```
-scripts/fastazl              FASTA CLI
-scripts/vcf/vcfzl            VCF CLI (classify / compress / decompress / archetypes)
-openzl/nyxfqz_v2       FASTQ codec binary
-tools/                       C++ transforms (biocompress_preprocessor, fasta_postprocess,
-                             vcf_preprocessing, vcf_postprocess, ...)
-schemas/fasta_packed_v5.sddl SDDL description of the FAV5 container
-artifacts/                   the shipped trained models
-scripts/train_*.sh           maintainer-only model regeneration
-batch_files/*.slurm          benchmark jobs
-results/                     benchmark output (CSV + summary)
+scripts/fastazl                    FASTA CLI
+scripts/vcf/vcfzl                  VCF CLI (classify / compress / decompress / archetypes)
+openzl/nyxfqz_v2                   FASTQ codec binary, built from tools/nyx/
+tools/                             C++ transforms (biocompress_preprocessor, fasta_postprocess,
+                                   vcf_preprocessing, vcf_postprocess, ...)
+tools/nyx/                         FASTQ codec source (nyxfqz_v2.cpp) + its makefiles
+schemas/fasta_packed_v5.sddl       SDDL description of the FAV5 container
+artifacts/fasta_model.zlc          the shipped FASTA model
+artifacts/fastq_models/            the shipped FASTQ model
+artifacts/vcf_models/              the 8 shipped VCF archetype models + archetypes.tsv
+batch_files/*.slurm                benchmark jobs
+results/                           benchmark output (CSV + summary)
+results/paper/                     the runs the manuscript reports, with a README
+docs/                              design notes
+paper/                             manuscript drafts (contents not version-controlled)
 ```
+
+Maintainer-only model regeneration lives in `scripts/train_fasta_model.sh`,
+`scripts/vcf/train_vcf_library.sh` and `scripts/fastq/retrain_paper_models.sh`.
+End users never run these.
 
 ## License / provenance
 

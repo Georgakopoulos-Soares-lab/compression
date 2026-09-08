@@ -93,6 +93,9 @@ profiler_*.out
 /data/fasta_train/
 
 # =============================================================================
-# Manuscript drafts (private — not for distribution)
+# Manuscript drafts (private — the folder is tracked, its contents are not)
 # =============================================================================
-/paper/
+/paper/*
+!/paper/.gitkeep
+!/paper/README.md
+/docs/*.docx

@@ -151,7 +151,7 @@ Arena limit is on TOTAL corpus bytes across samples, not read count (~14-25MB).
 ## Build Notes
 
 - cmake downloaded to `.tools/cmake-3.30.5-linux-x86_64/` (Stampede3 has no system cmake)
-- `scripts/build.sh` patched to find that cmake
+- `scripts/fastq/build_nyxfqz.sh` finds that cmake if present
 - Custom OpenZL files preserved via `rsync --exclude`: `openzl/nyx/nyxfqz.cpp`, `openzl/build-scripts/make/zldefs.make`, `openzl/nyxfqz.make`
 
 ## Key Environment Variables
