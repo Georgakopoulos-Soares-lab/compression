@@ -14,8 +14,9 @@ nyx decompress reads.fastq.nyx    # -> reads.fastq, byte for byte
 
 ## Install
 
-Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `git`, `zlib`,
-and Python 3.8+ only for the plotting and benchmark scripts.
+Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `cmake` 3.20 or
+newer, `git` and `zlib`. Python 3.8+ is needed only for the plotting and
+benchmark scripts, not for compressing anything.
 
 ```bash
 git clone https://github.com/Georgakopoulos-Soares-lab/compression
