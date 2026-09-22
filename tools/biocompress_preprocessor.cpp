@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <sys/mman.h>
+#include <cstring>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,6 +38,13 @@ struct MappedFile {
             throw std::runtime_error("Could not stat file: " + path);
         }
         size = sb.st_size;
+        if (size == 0) {
+            // mmap() of a zero-length file fails with EINVAL. An empty input is
+            // legal (and a compressor that dies on one is not usable in a
+            // pipeline), so represent it as a valid pointer over no bytes.
+            data = "";
+            return;
+        }
         data = (const char*)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (data == MAP_FAILED) {
             close(fd);
@@ -47,7 +55,7 @@ struct MappedFile {
     }
 
     ~MappedFile() {
-        if (data != MAP_FAILED) {
+        if (size > 0 && data != MAP_FAILED) {
             munmap((void*)data, size);
         }
         if (fd != -1) {
@@ -55,6 +63,37 @@ struct MappedFile {
         }
     }
 };
+
+// Release a finished byte range of the mapping back to the kernel.
+//
+// The input is mapped whole and read straight through, so without this every
+// page we touch stays resident and peak RSS tracks the *file* size: 14.8 GB on
+// bread wheat, which dwarfed the 450 MiB chunk buffers we actually need. The
+// mapping is PROT_READ|MAP_PRIVATE and nothing writes to it, so dropping the
+// pages is free -- any later access simply re-reads them from the file.
+// Rounds inward to whole pages so we never discard a neighbouring chunk's data.
+static void release_range(const char* start, const char* end) {
+    static const uintptr_t pg = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t a = ((uintptr_t)start + pg - 1) & ~(pg - 1);
+    uintptr_t b = (uintptr_t)end & ~(pg - 1);
+    if (b > a) madvise((void*)a, (size_t)(b - a), MADV_DONTNEED);
+}
+
+// Debug: report peak (VmHWM) and current (VmRSS) resident size at a checkpoint.
+static void rss_note(const char* tag) {
+    if (!std::getenv("BCP_RSS_LOG")) return;
+    long hwm = 0, rss = 0;
+    if (FILE* f = fopen("/proc/self/status", "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "VmHWM:", 6)) hwm = atol(line + 6);
+            else if (!strncmp(line, "VmRSS:", 6)) rss = atol(line + 6);
+        }
+        fclose(f);
+    }
+    std::fprintf(stderr, "[rss] %-22s hwm=%ld MB  rss=%ld MB\n",
+                 tag, hwm / 1024, rss / 1024);
+}
 
 void write_u32(std::ofstream& out, uint32_t val) {
     out.write(reinterpret_cast<const char*>(&val), 4);
@@ -428,112 +467,155 @@ void process_fasta_chunk(const char* start, const char* end, const std::string& 
 }
 
 // ============================================================================
-// FASTA Packed Processor (FAV4 - 4-bit packed bases)
+// FASTA Packed Processor (FAV5 - LOSSLESS)
+// ----------------------------------------------------------------------------
+// FAV4 was lossy: it case-folded (a->A), collapsed every non-ACGTN byte to N,
+// dropped '\r', and stored no line layout, so the original FASTA could not be
+// reconstructed. FAV5 is byte-exact. Each chunk decodes to its exact input
+// range (chunks are cut on record boundaries, so concatenating the decoded
+// chunks in index order reproduces the file). Reconstruction: tools/fasta_postprocess.
+//
+// Container (little-endian, no padding). All RLE arrays are length-prefixed by
+// the header counts. Exceptions (N runs, IUPAC codes, '\r', gaps, ...) are
+// run-length encoded so long N stretches cost ~24 bytes each, not O(len).
+//   "FAV5"  magic
+//   u8   flags            bit0 = this range ends with '\n'
+//   u8[3] reserved
+//   u32  preamble_len
+//   u32  num_records
+//   u64  n_seqpos         total sequence positions (bases + exception bytes)
+//   u64  n_base           positions whose byte is [ACGTacgt]
+//   u64  n_caseruns       upper/lower RLE over base positions (first run = upper)
+//   u64  n_excruns        exception runs
+//   u64  n_linelens       == sum(rec_nlines)
+//   u64  hdr_bytes        == sum(hdr_lens)
+//   Byte[preamble_len]                preamble
+//   u32[num_records]                  hdr_lens    (header text after '>', excl '\n')
+//   u32[num_records]                  rec_nlines
+//   u32[n_linelens]                   line_lens   (raw bytes per sequence line, no '\n')
+//   u64[n_caseruns]                   case_runs
+//   u64[n_excruns]                    exc_gaps    (base+exc positions since prev run end)
+//   u64[n_excruns]                    exc_lens
+//   Byte[n_excruns]                   exc_bytes   (the repeated literal byte)
+//   Byte[ceil(n_base/4)]              packed2bit  (A=0 C=1 G=2 T=3, low bits first)
+//   Byte[hdr_bytes]                   headers
 // ============================================================================
 
+static inline int base_code(char c) {
+    switch (c) {
+        case 'A': case 'a': return 0;
+        case 'C': case 'c': return 1;
+        case 'G': case 'g': return 2;
+        case 'T': case 't': return 3;
+        default: return -1;
+    }
+}
+static inline bool is_lower_base(char c) { return c >= 'a' && c <= 'z'; }
+
+template <class T>
+static void put_le(std::vector<uint8_t>& b, T v) {
+    for (size_t i = 0; i < sizeof(T); i++) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
+}
+
 void process_fasta_packed_chunk(const char* start, const char* end, const std::string& output_path) {
-    std::vector<uint32_t> hdr_offsets = {0};
-    std::vector<uint32_t> seq_offsets = {0};
-    std::vector<uint32_t> seq_lengths;
+    std::vector<uint8_t>  headers, exc_bytes, packed2bit;
+    std::vector<uint32_t> hdr_lens, rec_nlines, line_lens;
+    std::vector<uint64_t> case_runs, exc_gaps, exc_lens;
 
-    std::vector<char> hdrs;
-    std::vector<char> seqs;
+    // case RLE
+    bool have_case = false, cur_lower = false;
+    uint64_t cur_run = 0;
+    auto case_push = [&](bool lower) {
+        if (!have_case) { if (lower) case_runs.push_back(0); have_case = true; cur_lower = lower; cur_run = 1; return; }
+        if (lower == cur_lower) cur_run++;
+        else { case_runs.push_back(cur_run); cur_lower = lower; cur_run = 1; }
+    };
+    // exception RLE
+    bool exc_active = false; uint8_t exc_byte = 0; uint64_t exc_start = 0, exc_len = 0, prev_exc_end = 0;
+    auto exc_flush = [&]() {
+        if (!exc_active) return;
+        exc_gaps.push_back(exc_start - prev_exc_end);
+        exc_lens.push_back(exc_len);
+        exc_bytes.push_back(exc_byte);
+        prev_exc_end = exc_start + exc_len;
+        exc_active = false;
+    };
+    // 2-bit packer
+    int pend_n = 0; uint8_t pend_byte = 0;
+    auto pack_push = [&](int code) {
+        pend_byte |= static_cast<uint8_t>((code & 3) << (2 * pend_n));
+        if (++pend_n == 4) { packed2bit.push_back(pend_byte); pend_byte = 0; pend_n = 0; }
+    };
 
-    uint32_t current_seq_len = 0;
-    int pending_base = -1; // -1 == none pending
+    uint64_t seqpos = 0, n_base = 0;
 
-    const char* cursor = start;
+    const char* first_gt = static_cast<const char*>(memchr(start, '>', end - start));
+    const char* preamble_end = first_gt ? first_gt : end;
+    std::vector<uint8_t> preamble(reinterpret_cast<const uint8_t*>(start),
+                                 reinterpret_cast<const uint8_t*>(preamble_end));
+    const char* cursor = preamble_end;
 
-    while (cursor < end) {
-        if (*cursor == '>') {
-            // Finish previous record if any
-            if (hdr_offsets.size() > 1) {
-                if (pending_base != -1) {
-                    uint8_t b = static_cast<uint8_t>(pending_base << 4); // pad low nibble as A (0)
-                    seqs.push_back(static_cast<char>(b));
-                    pending_base = -1;
-                }
-                seq_offsets.push_back(static_cast<uint32_t>(seqs.size()));
-                seq_lengths.push_back(current_seq_len);
-                current_seq_len = 0;
-            }
+    while (cursor < end && *cursor == '>') {
+        const char* nl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+        const char* hdr_end = nl ? nl : end;
+        headers.insert(headers.end(), cursor + 1, hdr_end);
+        hdr_lens.push_back(static_cast<uint32_t>(hdr_end - (cursor + 1)));
+        cursor = nl ? nl + 1 : end;
 
-            const char* line_end = (const char*)memchr(cursor, '\n', end - cursor);
-            if (!line_end) line_end = end;
-
-            // store header without '>'
-            hdrs.insert(hdrs.end(), cursor + 1, line_end);
-            hdr_offsets.push_back(static_cast<uint32_t>(hdrs.size()));
-
-            cursor = line_end + 1;
-        } else {
-            const char* line_end = (const char*)memchr(cursor, '\n', end - cursor);
-            if (!line_end) line_end = end;
-
+        uint32_t nlines = 0;
+        while (cursor < end && *cursor != '>') {
+            const char* lnl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+            const char* line_end = lnl ? lnl : end;
+            line_lens.push_back(static_cast<uint32_t>(line_end - cursor));
             for (const char* p = cursor; p < line_end; ++p) {
-                char c = *p;
-                if (c == '\n' || c == '\r') continue;
-
-                uint8_t val = pack_base(c) & 0xF;
-                ++current_seq_len;
-
-                if (pending_base == -1) {
-                    pending_base = val;
+                int code = base_code(*p);
+                if (code < 0) {
+                    uint8_t c = static_cast<uint8_t>(*p);
+                    if (exc_active && c == exc_byte && seqpos == exc_start + exc_len) exc_len++;
+                    else { exc_flush(); exc_active = true; exc_byte = c; exc_start = seqpos; exc_len = 1; }
                 } else {
-                    uint8_t b = static_cast<uint8_t>((pending_base << 4) | val);
-                    seqs.push_back(static_cast<char>(b));
-                    pending_base = -1;
+                    case_push(is_lower_base(*p));
+                    pack_push(code);
+                    n_base++;
                 }
+                seqpos++;
             }
-
-            cursor = line_end + 1;
+            nlines++;
+            cursor = lnl ? lnl + 1 : end;
         }
+        rec_nlines.push_back(nlines);
     }
 
-    // Finish last record
-    if (hdr_offsets.size() > 1) {
-        if (pending_base != -1) {
-            uint8_t b = static_cast<uint8_t>(pending_base << 4);
-            seqs.push_back(static_cast<char>(b));
-            pending_base = -1;
-        }
-        seq_offsets.push_back(static_cast<uint32_t>(seqs.size()));
-        seq_lengths.push_back(current_seq_len);
-    }
+    exc_flush();
+    if (have_case) case_runs.push_back(cur_run);
+    if (pend_n) packed2bit.push_back(pend_byte);
+
+    std::vector<uint8_t> buf;
+    buf.insert(buf.end(), {'F','A','V','5'});
+    buf.push_back((end > start && end[-1] == '\n') ? 1u : 0u);
+    buf.insert(buf.end(), {0,0,0});
+    put_le<uint32_t>(buf, static_cast<uint32_t>(preamble.size()));
+    put_le<uint32_t>(buf, static_cast<uint32_t>(hdr_lens.size()));
+    put_le<uint64_t>(buf, seqpos);
+    put_le<uint64_t>(buf, n_base);
+    put_le<uint64_t>(buf, static_cast<uint64_t>(case_runs.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(exc_gaps.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(line_lens.size()));
+    put_le<uint64_t>(buf, static_cast<uint64_t>(headers.size()));
+
+    buf.insert(buf.end(), preamble.begin(), preamble.end());
+    for (uint32_t v : hdr_lens)   put_le<uint32_t>(buf, v);
+    for (uint32_t v : rec_nlines) put_le<uint32_t>(buf, v);
+    for (uint32_t v : line_lens)  put_le<uint32_t>(buf, v);
+    for (uint64_t v : case_runs)  put_le<uint64_t>(buf, v);
+    for (uint64_t v : exc_gaps)   put_le<uint64_t>(buf, v);
+    for (uint64_t v : exc_lens)   put_le<uint64_t>(buf, v);
+    buf.insert(buf.end(), exc_bytes.begin(), exc_bytes.end());
+    buf.insert(buf.end(), packed2bit.begin(), packed2bit.end());
+    buf.insert(buf.end(), headers.begin(), headers.end());
 
     std::ofstream out(output_path, std::ios::binary);
-    out.write("FAV4", 4);
-
-    uint32_t num_records = static_cast<uint32_t>(seq_lengths.size());
-    write_u32(out, num_records);
-
-    // Offsets (num_records + 1 each)
-    out.write(reinterpret_cast<const char*>(hdr_offsets.data()), hdr_offsets.size() * 4);
-    out.write(reinterpret_cast<const char*>(seq_offsets.data()), seq_offsets.size() * 4);
-
-    // Original sequence lengths
-    if (!seq_lengths.empty()) {
-        out.write(reinterpret_cast<const char*>(seq_lengths.data()), seq_lengths.size() * 4);
-    }
-
-    uint32_t hdr_total = static_cast<uint32_t>(hdrs.size());
-    uint32_t seq_total = static_cast<uint32_t>(seqs.size());
-
-    write_u32(out, hdr_total);
-    write_u32(out, seq_total);
-
-    uint32_t hdr_pad = (4 - (hdr_total % 4)) % 4;
-    uint32_t seq_pad = (4 - (seq_total % 4)) % 4;
-
-    write_u32(out, hdr_pad);
-    write_u32(out, seq_pad);
-
-    out.write(hdrs.data(), hdrs.size());
-    pad_stream(out, hdrs.size(), 4);
-
-    out.write(seqs.data(), seqs.size());
-    pad_stream(out, seqs.size(), 4);
-
+    out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
     out.close();
 }
 
@@ -750,7 +832,9 @@ FileType detect_type(const char* data, size_t size) {
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <input_file> <output_dir> <num_threads> [type]" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " <input_file> <output_dir> <num_threads> [type] [max_mem_mb]"
+                  << std::endl;
         return 1;
     }
 
@@ -758,6 +842,8 @@ int main(int argc, char* argv[]) {
     std::string output_dir = argv[2];
     int num_threads = std::stoi(argv[3]);
     std::string type_str = (argc > 4) ? argv[4] : "";
+    // Optional peak-RSS budget in MB (0 = use the default chunk cap).
+    size_t max_mem_mb = (argc > 5) ? (size_t)std::stoull(argv[5]) : 0;
 
     try {
         MappedFile file(input_path);
@@ -782,6 +868,17 @@ int main(int argc, char* argv[]) {
         if (type == VCF) {
             max_chunk_bytes = 300ull * 1024ull * 1024ull; // tighter cap for VCF to avoid OpenZL allocator failures
         }
+        // Peak RSS is dominated by the chunk buffers: every worker holds one
+        // chunk's worth of packed sequence, line lengths and case runs at once,
+        // which measures at ~1x the chunk size. So a budget translates directly
+        // into a chunk cap of budget/threads. Smaller chunks give OpenZL less
+        // context, so this trades a little ratio for a bounded footprint.
+        if (max_mem_mb > 0) {
+            size_t per = (max_mem_mb * 1000000ull)
+                       / (size_t)std::max(1, num_threads);
+            max_chunk_bytes = std::min(max_chunk_bytes,
+                                       std::max<size_t>(per, 16ull << 20));
+        }
         const size_t requested_chunks = static_cast<size_t>(std::max(1, num_threads));
 
         size_t size_based_chunks = (file.size + max_chunk_bytes - 1) / max_chunk_bytes;
@@ -792,6 +889,7 @@ int main(int argc, char* argv[]) {
 
         // For very small files, boundary snapping may collapse trailing empty chunks.
 
+        const char* scanned = file.data; // high-water mark of the boundary scan
         std::vector<const char*> split_points;
         split_points.reserve(chunk_count + 1);
         split_points.push_back(file.data);
@@ -802,6 +900,17 @@ int main(int argc, char* argv[]) {
             if (target >= end) {
                 split_points.push_back(end);
                 continue;
+            }
+            // Never scan ground the previous boundary already covered. On an
+            // assembly a record is a whole chromosome, so every candidate
+            // boundary that lands inside one used to scan forward to that same
+            // chromosome's end -- quadratic page touching that set the peak
+            // (10.7 GB on bread wheat at a 2000 MB budget, and *higher* than at
+            // 4000 MB because a smaller chunk target means more candidates
+            // rescanning the same bases). Clamping makes the total scan linear.
+            const char* prev = split_points.back();
+            if (target < prev) {
+                target = prev;
             }
 
             // Adjust to record boundary
@@ -825,8 +934,20 @@ int main(int argc, char* argv[]) {
                 cursor++;
             }
             split_points.push_back(cursor);
+            // The scan above walks forward to the next record start, which on an
+            // assembly can be most of a chromosome. Doing that for every boundary
+            // faulted in 2.2 GB of a 3.3 GB genome *before* the first worker ran,
+            // which set the peak no matter how the workers were throttled. Give
+            // the scanned pages straight back; the workers re-fault the little
+            // they need from the (still warm) page cache.
+            release_range(scanned, cursor);
+            scanned = cursor;
         }
         split_points.push_back(file.data + file.size);
+        // Sweep up anything the per-boundary releases missed (kernel read-ahead
+        // runs past the byte the scan actually stopped on).
+        release_range(file.data, file.data + file.size);
+        rss_note("after split scan");
 
         // VCF Header Pre-pass
         VcfHeaderInfo vcf_header;
@@ -836,7 +957,26 @@ int main(int argc, char* argv[]) {
 
         // Launch worker threads (limit concurrency to requested num_threads while supporting extra chunks)
         const size_t total_chunks = split_points.size() - 1;
-        const size_t worker_count = std::max<size_t>(1, std::min<size_t>(total_chunks, requested_chunks));
+        size_t worker_count = std::max<size_t>(1, std::min<size_t>(total_chunks, requested_chunks));
+
+        // Chunk boundaries snap to record starts, so on an assembly the chunks
+        // cannot be made smaller than the largest record -- human chr1 alone is
+        // ~253 MB. Shrinking the cap therefore stops bounding memory at some
+        // point, and the only remaining lever is how many of those chunks are
+        // in flight. Cap the workers so that workers x largest chunk fits the
+        // budget: this makes the bound hold on any input, at the cost of
+        // concurrency on files with very large records.
+        if (max_mem_mb > 0) {
+            size_t largest = 0;
+            for (size_t i = 0; i < total_chunks; ++i) {
+                largest = std::max(largest,
+                                   (size_t)(split_points[i + 1] - split_points[i]));
+            }
+            if (largest > 0) {
+                size_t fit = (max_mem_mb * 1000000ull) / largest;
+                worker_count = std::max<size_t>(1, std::min(worker_count, fit));
+            }
+        }
         std::atomic<size_t> next_chunk{0};
 
         auto process_chunk = [&](size_t idx) {
@@ -858,6 +998,10 @@ int main(int argc, char* argv[]) {
             else if (type == FASTA) process_fasta_chunk(start, end, out_path);
             else if (type == FASTA_PACKED) process_fasta_packed_chunk(start, end, out_path);
             else if (type == VCF) process_vcf_chunk(start, end, out_path, vcf_header);
+
+            // This chunk will never be read again -- give its pages back.
+            release_range(start, end);
+            rss_note("chunk done");
         };
 
         std::vector<std::thread> threads;
@@ -873,6 +1017,7 @@ int main(int argc, char* argv[]) {
         }
 
         for (auto& t : threads) t.join();
+        rss_note("all chunks done");
         
         std::cout << "Processing complete. Output in " << output_dir << std::endl;
 

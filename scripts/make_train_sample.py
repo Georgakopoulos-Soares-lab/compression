@@ -59,14 +59,38 @@ def main() -> int:
     written = 0
     records = 0
 
+    def enc_len(s: str) -> int:
+        return len(s.encode("utf-8", errors="surrogateescape"))
+
     with out.open("wt", encoding="utf-8", errors="surrogateescape") as w:
         for header, seq_lines in iter_fasta_records(inp):
             record_text = header + "".join(seq_lines)
-            record_bytes = len(record_text.encode("utf-8", errors="surrogateescape"))
+            record_bytes = enc_len(record_text)
 
             if records > 0 and written + record_bytes > target_bytes:
                 # Don't overshoot: skip this record and look for smaller ones.
                 continue
+
+            if written + record_bytes > target_bytes:
+                # A single record larger than the whole target (e.g. a plant
+                # chromosome). Emit it truncated at a sequence-line boundary so
+                # the sample stays near the target and, crucially, so the
+                # preprocessed training chunk stays under OpenZL's per-file
+                # training size limit. Still valid FASTA.
+                budget = target_bytes - written - enc_len(header)
+                w.write(header)
+                acc = 0
+                for ln in seq_lines:
+                    lb = enc_len(ln)
+                    if acc + lb > budget and acc > 0:
+                        break
+                    w.write(ln)
+                    acc += lb
+                if seq_lines and not seq_lines[-1].endswith("\n"):
+                    w.write("\n")
+                written += enc_len(header) + acc
+                records += 1
+                break
 
             w.write(record_text)
             written += record_bytes

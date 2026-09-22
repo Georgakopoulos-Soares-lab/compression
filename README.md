@@ -1,257 +1,177 @@
-# FASTA Packed (FAV4) OpenZL pipeline (dev)
+# NYX — format-aware compression for omics files
 
-This folder is a self-contained, reproducible pipeline that:
-
-1) downloads a large reference FASTA (default: NCBI GRCm39 mouse genome)
-2) creates the exact “~200MiB” *record-safe* training sample used by the pipeline
-3) preprocesses FASTA into a schema-matching binary format (`FAV4`, 4-bit packed bases)
-4) trains an OpenZL compressor on the packed training chunk(s)
-5) compresses the full packed FASTA and reports ratios vs the original text FASTA
-6) runs a pigz `-9` baseline with timing
-
-If you only want to run it, see [INSTALL.md](INSTALL.md). This README explains the *what/why* and includes the exact commands.
-
----
-
-## Repo status: “clean” and ready to run
-
-This repo is considered “clean” when generated outputs are absent (or ignored): `chunks*`, `out*`, `artifacts*`.
-
-To reset back to a clean state at any time:
+NYX losslessly compresses **FASTA, FASTQ, VCF and BED** files. It rewrites each
+file into homogeneous streams with a reversible, format-specific transform, then
+compresses those streams with pre-trained [OpenZL](https://github.com/facebook/openzl)
+graphs. **Nothing is trained on your data**, every round trip is byte-exact, and
+one input file always produces exactly one output file, however many threads it
+uses.
 
 ```bash
-bash scripts/clean_generated.sh
+nyx compress reads.fastq          # -> reads.fastq.nyx
+nyx decompress reads.fastq.nyx    # -> reads.fastq, byte for byte
 ```
 
-Then the pipeline can be run again from scratch.
+## Install
 
----
-
-## Quickstart (the same pipeline you just ran)
-
-```bash
-# defaults: TARGET_MIB=200 THREADS=16 MAX_TIME_SECS=1800 (misi wra)
-bash scripts/run_train_250_and_test_full.sh
-```
-
-Common overrides:
+Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `git`, `zlib`,
+and Python 3.8+ only for the plotting and benchmark scripts.
 
 ```bash
-TARGET_MIB=200 THREADS=16 MAX_TIME_SECS=1800 COMPRESS_JOBS=4 NO_ACE_SUCCESSORS=1 \
-  VALIDATE_FULL=1 bash scripts/run_train_250_and_test_full.sh
-```
-
----
-
-## Step-by-step: download → sample → train → full test
-
-All commands below run from this `dev/` directory.
-
-### 0) Fetch OpenZL and build everything
-
-```bash
-bash scripts/get_openzl.sh
+git clone https://github.com/Georgakopoulos-Soares-lab/compression
+cd compression
 bash scripts/build_all.sh
 ```
 
-Build products:
-
-- `openzl/zli`
-- `tools/biocompress_preprocessor`
-
-### 1) Download the FASTA (default dataset)
-
-Download + decompress (idempotent):
+That fetches a pinned OpenZL (0.2.5), patches it, builds it, and builds all four
+codecs. It takes a few minutes. Check it with:
 
 ```bash
-bash scripts/download_fasta.sh
+./nyx test <any FASTA, FASTQ, VCF or BED file>
 ```
 
-By default, this downloads:
-
-- `https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/635/GCF_000001635.27_GRCm39/GCF_000001635.27_GRCm39_genomic.fna.gz`
-
-Outputs:
-
-- `data/GCF_000001635.27_GRCm39_genomic.fna.gz`
-- `data/GCF_000001635.27_GRCm39_genomic.fna`
-
-Override the dataset if you want:
+which compresses, decompresses, compares against the original and keeps nothing.
+Put `nyx` on your `PATH` with a symlink if you like — it finds its own directory:
 
 ```bash
-FASTA_URL='https://.../your.fna.gz' bash scripts/download_fasta.sh
+ln -s "$PWD/nyx" ~/.local/bin/nyx
 ```
 
-### 2) Create the exact ~200MiB training FASTA (record-safe)
+## Use
 
-The training sample is created by copying *whole FASTA records* (never splitting a record):
+One command handles every format. The format is read from the file's **content**,
+not its name, so a VCF called `.txt` is still a VCF and gzip/bgzip input is read
+through transparently.
 
 ```bash
-python3 scripts/make_train_sample.py \
-  --in data/GCF_000001635.27_GRCm39_genomic.fna \
-  --out out/train_200MiB.fasta \
-  --target-mib 200
+nyx compress   calls.vcf                    # -> calls.vcf.nyx
+nyx compress   genome.fa.gz archive.nyx     # explicit output name
+nyx compress   reads.fastq --verify         # decompress and compare before exiting
+nyx compress   peaks.narrowPeak --threads 8 --max-mem-mb 2000
+nyx decompress calls.vcf.nyx                # -> calls.vcf
+nyx info       calls.vcf.nyx                # what this file is
+nyx test       calls.vcf                    # round-trip check, keeps nothing
 ```
 
-Note: because we keep whole records, the output often lands near (but not exactly) 200MiB.
-On the default GRCm39 file, the pipeline typically writes 41 records and ~202,465,410 bytes.
+| option | meaning |
+|---|---|
+| `--threads N` | worker threads (default: every core) |
+| `--max-mem-mb N` | memory budget in MB. Defaults: 4000 for FASTA and BED, 500 for FASTQ; VCF uses 64 MB blocks unless a budget is given |
+| `--verify` | decompress the new archive and compare it with the input |
+| `--force`, `-f` | overwrite an existing output file |
+| `--format F` | `vcf`, `fasta`, `fastq` or `bed`, if detection gets it wrong |
+| `--quiet`, `-q` | print nothing unless something fails |
 
-### 3) Preprocess training FASTA → packed binary (`FAV4`)
+Peak memory follows the budget, not the size of the input: an 18.4 GB VCF
+compresses inside 1.3 GB at `--max-mem-mb 2000`. The per-format tools can also be
+called directly — `tools/nyx_vcf`, `tools/nyx_bed`, `scripts/fastazl`,
+`openzl/nyxfqz_v2` — which is what the benchmark scripts do.
 
-This converts text FASTA to schema-matching `.fasta_packed.bin`:
+## What it gives you
+
+One 16-core node, whole files, every row paired with a full decompression and a
+byte comparison. The CSVs behind this are in `results/`.
+
+| input | size | NYX | best other codec |
+|---|---|---|---|
+| 1000 Genomes chr20, panel VCF | 18.4 GB | **468.7×** | xz -9e 232.3× |
+| 1000 Genomes chr22, panel VCF | 11.2 GB | **431.8×** | xz -9e 214.6× |
+| GIAB HG004, single-sample VCF | 2.8 GB | **52.2×** | xz -9e 38.7× |
+| ClinVar, sites VCF | 1.9 GB | **16.9×** | xz -9e 15.4× |
+| ChromHMM segmentation, BED | 53 MB | **30.2×** | xz -9e 13.4× |
+| 34-file BED corpus, all dialects | 1.17 GB | **9.05×** | xz -9e 6.19× |
+| ERR9539086, FASTQ | 8.4 GB | **7.87×** | SPRING 7.50× |
+| GRCm39, FASTA | 2.8 GB | 4.82× | NAF -20 5.00× |
+
+Where each format stands, stated plainly:
+
+- **VCF** — the highest ratio of any codec tested on 9 of 10 files, up to 2.0× the
+  best general-purpose codec, at 14–37× the speed of `zstd -19`.
+- **BED** — the highest ratio on all 34 files, 1.2–2.3× the best general-purpose
+  codec. On files under ~50 MB, `xz` with a blocked stream compresses faster.
+- **FASTQ** — a better ratio than every general-purpose codec on all six runs, and
+  than SPRING on the libraries without duplicate reads, at 2–3× SPRING's speed and
+  a third of its memory. On libraries with many duplicate reads (small-RNA,
+  amplicon) SPRING compresses 1.3–2.0× smaller; `scripts/fastq/duplication_profile.sh`
+  tells you which case a library is, in seconds, before you compress it.
+- **FASTA** — NAF at its strongest setting compresses 3–5% smaller on mammalian
+  assemblies, and much smaller on bread wheat. NYX gets within 3–5% of it while
+  compressing 57–73× faster, and beats every general-purpose codec on ratio and
+  speed at once.
+
+Across all 54 files benchmarked, **no codec produced a smaller file than NYX in
+less time**. The tools that do compress smaller take 1.2× to 73× longer.
+`python3 src/multi_axis.py --results results` regenerates that analysis per file.
+
+## Exactness
+
+Every block is decoded again in-process and compared with its source before the
+encoder accepts it; anything that does not reproduce exactly is stored verbatim.
+An empty file, a byte-order mark, CR-only line endings, ragged columns, or a file
+that is not the format at all is stored rather than refused or mangled, so the
+tool is total: any file goes in and the same bytes come out.
 
 ```bash
-./tools/biocompress_preprocessor out/train_200MiB.fasta chunks_train_200MiB 1 fasta_packed
+bash tests/test_vcf_roundtrip.sh   # 155 cases
+bash tests/test_seq_roundtrip.sh   # 36 FASTA/FASTQ cases
+bash tests/test_bed_roundtrip.sh   # 49 BED cases
 ```
 
-Why `1` thread here? With the default chunk sizing, using one thread makes it more likely to emit a single training chunk.
+## Models
 
-### 4) Train OpenZL on the packed training data
+The shipped models are in `artifacts/`. They are trained offline, by us, on
+public data that is **not** in the benchmark above, and are never retrained at
+compression time — see `artifacts/fastq_models/MANIFEST.md` for the FASTQ
+accessions and `scripts/*/train_*.sh` for how each set is produced. A shipped
+model is used for a stream only when it beats OpenZL's untrained profile on that
+stream, measured per stream, so a file unlike anything in the training data
+falls back rather than paying for the mismatch.
+
+## Reproducing the paper
 
 ```bash
-./openzl/zli train chunks_train_200MiB \
-  --profile sddl --profile-arg schemas/fasta_packed.sddl \
-  --output artifacts/fasta_packed_train_200MiB_t16.compressor \
-  --force --threads 16 --use-all-samples --max-time-secs 1800 \
-  --no-ace-successors
+bash scripts/vcf/download_vcf.sh            # corpora (large)
+bash scripts/vcf/benchmark_nyx_vcf.sh --threads 16
+bash scripts/vcf/ablation_nyx_vcf.sh  --threads 16
+bash scripts/benchmark_fasta.sh       --threads 16
+bash scripts/fastq/benchmark_fastq.sh --threads 16
+bash scripts/bed/benchmark_bed.sh     --threads 16
+python3 src/plot_paper_figures.py --results results --out plots/paper
+python3 src/make_paper_tables.py  --results results --out results/paper_tables.md
 ```
 
-The `--no-ace-successors` flag is used by default for robustness when compressing *unseen* chunks from the full FASTA.
+Figures and tables read from `results/*.csv`, so they regenerate without
+re-running a single benchmark.
 
-### 5) Preprocess full FASTA → packed binary chunks
+## Layout
 
-```bash
-./tools/biocompress_preprocessor \
-  data/GCF_000001635.27_GRCm39_genomic.fna \
-  chunks_full 16 fasta_packed
+```
+nyx                          single entry point, format auto-detected
+tools/nyx_vcf.cpp            VCF codec  (haplotype PBWT, per-key streams, OpenZL)
+tools/nyx_bed.cpp            BED codec  (per-column encodings, cross-column references)
+tools/nyx/nyxfqz_v2.cpp      FASTQ codec (identifier/sequence/quality streams)
+tools/biocompress_preprocessor.cpp, tools/fasta_postprocess.cpp, scripts/fastazl
+                             FASTA codec (FAV5 packed transform)
+tools/nyx_stream.h           stream container shared by the VCF and BED codecs
+artifacts/                   shipped models
+scripts/                     build, download, training and benchmark drivers
+results/                     benchmark CSVs; every figure and table reads from here
+tests/                       edge-case and hostile-input round-trip suites
+docs/                        per-format notes and what each competing tool preserves
 ```
 
-### 6) Compress full chunks (parallel across chunk files)
+## Citing
 
-```bash
-find chunks_full -maxdepth 1 -type f -name '*.fasta_packed.bin' -print0 | \
-  xargs -0 -P 4 -I {} ./openzl/zli compress "{}" \
-    --compressor artifacts/fasta_packed_train_200MiB_t16.compressor \
-    --output "{}.zl" --force
-```
+Patsakis M, Margaris A, Chronopoulos T, Mouratidis I, Georgakopoulos-Soares I.
+*Byte-exact, format-aware compression for FASTA, FASTQ, BED and VCF files.*
+(manuscript in preparation)
 
-### 7) Optional: decompress + validate (byte-for-byte)
+## License
 
-```bash
-for bin in chunks_full/*.fasta_packed.bin; do
-  ./openzl/zli decompress "$bin.zl" --output "$bin.dec" --force
-  cmp -s "$bin" "$bin.dec" || { echo "Mismatch: $bin"; exit 1; }
-  rm -f "$bin.dec"
-done
-echo "Full validation OK"
-```
+NYX is released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
+free to use, modify and redistribute for research, teaching and any other
+noncommercial purpose, including at universities, hospitals, public research
+institutes and government bodies, whatever the source of their funding. For any
+other use, write to the corresponding authors.
 
-### 8) pigz -9 baseline (original FASTA)
-
-```bash
-pigz -9 -p 16 -c data/GCF_000001635.27_GRCm39_genomic.fna > out/pigz/GCF_000001635.27_GRCm39_genomic.fna.gz
-```
-
----
-
-## Binary format: `.fasta_packed.bin` and the SDDL schema
-
-Schema: [schemas/fasta_packed.sddl](schemas/fasta_packed.sddl)
-
-Each packed chunk file is a container of FASTA records. Conceptually it’s a “columnar-ish” layout:
-
-- headers are concatenated into one byte array (`headers`)
-- sequences are concatenated into one byte array (`sequences`), but bases are 4-bit packed (2 bases/byte)
-- offsets arrays map each record to its slice of `headers` and `sequences`
-
-Fields (in order):
-
-- `magic` (4 bytes): ASCII `FAV4`
-- `num_records` (U32)
-- `hdr_offsets` (U32[num_records+1]): prefix sums into `headers`
-- `seq_offsets` (U32[num_records+1]): prefix sums into `sequences` (packed bytes)
-- `seq_lengths` (U32[num_records]): original sequence lengths in bases (needed because packing is 2 bases/byte)
-- `hdr_total`, `seq_total` (U32): payload lengths (unpadded)
-- `hdr_pad`, `seq_pad` (U32): padding amounts (we align payloads to 4 bytes)
-- `headers` (Byte[hdr_total + hdr_pad])
-- `sequences` (Byte[seq_total + seq_pad])
-
-The trailing `: Byte[_rem]` in the SDDL is a permissive “consume remainder” so the schema won’t break if extra bytes appear.
-
-### 4-bit base packing
-
-The packed sequence stream stores bases as nibbles:
-
-- `A=0`, `C=1`, `G=2`, `T=3`, `N=4` (and any unknown mapped to `N`)
-
-Two bases per byte: first base in the high nibble, second base in the low nibble.
-If the number of bases is odd, the last base is stored in the high nibble and the low nibble is padded with 0.
-
----
-
-## C++ preprocessor: how it produces `FAV4`
-
-Source: [tools/biocompress_preprocessor.cpp](tools/biocompress_preprocessor.cpp)
-
-The preprocessor does two main jobs:
-
-1) **Chunking**
-   - mmaps the input FASTA for fast scanning
-   - chooses chunk byte-ranges and *snaps* each range to FASTA record boundaries (`>` at start-of-line)
-   - each worker thread converts one snapped range into one `.fasta_packed.bin`
-
-2) **Parsing + packing (`process_fasta_packed_chunk`)**
-   - whenever it sees a line starting with `>` it starts a new record and stores the header bytes without the leading `>`
-   - sequence lines are concatenated (newlines ignored) and each base is mapped to a 4-bit value
-   - bases are packed two-per-byte; a single trailing base is padded into the high nibble
-   - `hdr_offsets` / `seq_offsets` are prefix sums (they start with 0 and append after each record)
-   - `seq_lengths` stores the original base count per record so exact reconstruction is possible
-   - `headers` and `sequences` payloads are padded to a 4-byte boundary (`hdr_pad`, `seq_pad`)
-
-This is intentionally simple and “binary friendly” for OpenZL: the schema gives structure, and the preprocessor produces stable bytes that are easy to round-trip validate with `cmp`.
-
----
-
-## Expected results (sanity checklist)
-
-After a successful run of:
-
-```bash
-bash scripts/clean_generated.sh
-bash scripts/run_train_250_and_test_full.sh
-```
-
-you should see these files/directories:
-
-- `data/`
-  - `GCF_000001635.27_GRCm39_genomic.fna.gz` (downloaded)
-  - `GCF_000001635.27_GRCm39_genomic.fna` (decompressed)
-- `out/`
-  - `train_200MiB.fasta` (record-safe training FASTA; size near the target)
-  - `timing/`
-    - `train.time`, `prep_full.time`, `openzl_comp_full.time` (and `pigz.time` if pigz exists)
-  - `pigz/` (only if `pigz` is installed)
-    - `GCF_000001635.27_GRCm39_genomic.fna.gz`
-- `artifacts/`
-  - `fasta_packed_train_200MiB_t16.compressor`
-- `chunks_train_200MiB/`
-  - `chunk_00000.fasta_packed.bin` (often a single chunk with the default settings)
-  - `*.fasta_packed.bin.zl` (training chunk compressed outputs)
-- `chunks_full/`
-  - `chunk_*.fasta_packed.bin` (packed full-file chunks)
-  - `chunk_*.fasta_packed.bin.zl` (compressed full-file chunks)
-
-Console output should include summary lines like:
-
-- `Original FASTA size: ... MiB`
-- `Training packed payload size: ... MiB`
-- `Training-set validation OK`
-- `Full packed input total: ... MiB`
-- `OpenZL vs original FASTA: in=... out=... ratio=...x`
-- `pigz -9 vs original FASTA: in=... out=... ratio=...x` (only if pigz exists)
-- `Timing (seconds):` followed by the timing files.
-
-Notes:
-
-- Exact compressed sizes and ratios depend on the OpenZL commit, CPU, and training time budget, but the file layout and the “validation OK” result should be consistent.
-- If `VALIDATE_FULL=1` is enabled, a successful run ends with `Full validation OK`.
+OpenZL is fetched at build time and carries its own license.

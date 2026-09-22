@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# fastazl — byte-exact FASTA compression with the shipped universal OpenZL model.
+#
+#   fastazl compress   <in.fasta> <out.fazl> [--threads N] [--max-mem-mb N] [--verify]
+#                      --max-mem-mb defaults to 4000; 0 means unbounded.
+#   fastazl decompress <in.fazl>  <out.fasta> [--threads N]
+#   fastazl info       <in.fazl>
+#
+# Pipeline: biocompress_preprocessor packs the FASTA into the FAV5 container
+# (2-bit ACGT + RLE case mask + RLE exception runs + explicit line layout), each
+# chunk is compressed with artifacts/fasta_model.zlc, and the pieces are stored
+# in a tar. Decoding runs zli decompress + fasta_postprocess.
+#
+# Losslessness: soft-masking, IUPAC codes, arbitrary line widths, CRLF and a
+# missing trailing newline are all preserved. Any chunk the trained model cannot
+# handle falls back to `zli compress --profile serial`, so the round trip is
+# always byte-exact. `--verify` proves it by decoding and comparing.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ZLI="${ZLI:-$HERE/openzl/zli}"
+PRE="${FASTA_PRE:-$HERE/tools/biocompress_preprocessor}"
+POST="${FASTA_POST:-$HERE/tools/fasta_postprocess}"
+MODEL="${FASTA_MODEL:-$HERE/artifacts/fasta_model.zlc}"
+SDDL="${FASTA_SDDL:-$HERE/schemas/fasta_packed_v5.sddl}"
+FAZL_VERSION="fazl1"
+
+die() { echo "fastazl: $*" >&2; exit 1; }
+require() {
+  [ -x "$ZLI" ]  || die "openzl/zli not built — run scripts/build_all.sh"
+  [ -x "$PRE" ]  || die "tools/biocompress_preprocessor not built — run scripts/build_all.sh"
+  [ -x "$POST" ] || die "tools/fasta_postprocess not built — run scripts/build_all.sh"
+}
+
+cmd_compress() {
+  # Default to a 4 GB working set. Unbudgeted, a 14.8 GB assembly peaked at
+  # 14.5 GB -- enough to fail on the workstation where most of this data is
+  # handled -- while the same file at this budget produced a byte-identical
+  # archive in the same wall time at 3.5 GB. A budget that costs nothing should
+  # not be opt-in. `--max-mem-mb 0` restores the unbounded behaviour.
+  local in="" out="" threads="${SLURM_CPUS_PER_TASK:-$(nproc)}" verify=0 maxmem=4000
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --threads)    threads="$2"; shift 2;;
+      --max-mem-mb) maxmem="$2"; shift 2;;
+      --verify)     verify=1; shift;;
+      -*)           die "unknown option: $1";;
+      *)            if [ -z "$in" ]; then in="$1"; else out="$1"; fi; shift;;
+    esac
+  done
+  [ -n "$in" ] && [ -n "$out" ] || die "usage: fastazl compress <in.fasta> <out.fazl> [--threads N] [--max-mem-mb N] [--verify]"
+  [ -f "$in" ] || die "no such file: $in"
+  require
+
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  mkdir -p "$work/chunks"
+
+  echo "fastazl: packing (FAV5, $threads threads)..." >&2
+  "$PRE" "$in" "$work/chunks" "$threads" fasta_packed "$maxmem" >/dev/null 2>&1 \
+    || die "preprocessing failed on $in"
+
+  local comp="-" prof
+  prof="$(cat "${MODEL%.zlc}.profile" 2>/dev/null)"
+  if [ "$prof" = sddl ] && [ -s "$SDDL" ]; then comp="sddl:$SDDL"
+  elif [ -s "$MODEL" ]; then comp="$MODEL"
+  else echo "fastazl: no model at $MODEL — using the serial profile" >&2
+  fi
+  # The packer is not the only stage that holds memory: fasta_compress_chunks.sh
+  # runs `threads` copies of zli, and zli peaks at ~3.8x the packed chunk it is
+  # given (measured: 392 MB on a 104 MB chunk through the SDDL profile). On a
+  # 14.8 GB assembly that stage, not the packer, set the peak -- which is why a
+  # 2000 MB budget once measured *higher* than a 4000 MB one. Throttle it from
+  # the same budget, using the largest chunk actually produced.
+  local cthreads="$threads"
+  if [ "$maxmem" -gt 0 ]; then
+    local biggest
+    biggest=$(find "$work/chunks" -maxdepth 1 -name '*.fasta_packed.bin' -printf '%s\n' \
+              | sort -n | tail -1)
+    if [ -n "$biggest" ] && [ "$biggest" -gt 0 ]; then
+      cthreads=$(( maxmem * 1000000 / (4 * biggest) ))
+      [ "$cthreads" -lt 1 ] && cthreads=1
+      [ "$cthreads" -gt "$threads" ] && cthreads="$threads"
+    fi
+  fi
+  echo "fastazl: compressing chunks ($cthreads at a time)..." >&2
+  : > "$work/fb.count"
+  bash "$HERE/scripts/fasta_compress_chunks.sh" "$ZLI" "$work/chunks" "$cthreads" "$comp" "$work/fb.count" \
+    || die "chunk compression failed"
+
+  local nbin nzl
+  nbin=$(find "$work/chunks" -maxdepth 1 -name '*.fasta_packed.bin'    | wc -l)
+  nzl=$( find "$work/chunks" -maxdepth 1 -name '*.fasta_packed.bin.zl' | wc -l)
+  [ "$nzl" -eq "$nbin" ] || die "only $nzl/$nbin chunks compressed"
+  rm -f "$work/chunks"/*.fasta_packed.bin
+
+  printf '%s\n' "$FAZL_VERSION" > "$work/FORMAT"
+  printf 'chunks=%s\nfallback_parts=%s\nmodel=%s\n' \
+    "$nzl" "$(wc -l < "$work/fb.count" | tr -d ' ')" "$(basename "$comp")" > "$work/manifest"
+  tar -C "$work" -cf "$out" FORMAT manifest chunks || die "could not write $out"
+
+  local isz osz; isz=$(stat -c%s "$in"); osz=$(stat -c%s "$out")
+  echo "fastazl: done  $(awk -v b="$isz" 'BEGIN{printf "%.1f MB", b/1e6}') -> $(awk -v b="$osz" 'BEGIN{printf "%.1f MB", b/1e6}')  ($(awk -v a="$isz" -v b="$osz" 'BEGIN{printf "%.3fx", a/b}'))" >&2
+
+  if [ "$verify" = 1 ]; then
+    local back="$work/verify.fasta"
+    cmd_decompress "$out" "$back" --threads "$threads" >/dev/null 2>&1 \
+      || die "--verify: decompression failed"
+    cmp -s "$in" "$back" || die "--verify: ROUND TRIP MISMATCH"
+    echo "fastazl: --verify OK (byte-exact round trip confirmed)" >&2
+  fi
+}
+
+cmd_decompress() {
+  local in="" out="" threads="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --threads) threads="$2"; shift 2;;
+      -*)        die "unknown option: $1";;
+      *)         if [ -z "$in" ]; then in="$1"; else out="$1"; fi; shift;;
+    esac
+  done
+  [ -n "$in" ] && [ -n "$out" ] || die "usage: fastazl decompress <in.fazl> <out.fasta> [--threads N]"
+  [ -f "$in" ] || die "no such file: $in"
+  require
+
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  tar -C "$work" -xf "$in" || die "not a fastazl archive: $in"
+  [ "$(cat "$work/FORMAT" 2>/dev/null)" = "$FAZL_VERSION" ] \
+    || die "unsupported archive version: $(cat "$work/FORMAT" 2>/dev/null)"
+
+  # An empty input packs to zero chunks; the postprocessor has nothing to
+  # reassemble and fails, so short-circuit it. An empty file is a legal input
+  # and must come back as an empty file.
+  if [ "$(find "$work/chunks" -maxdepth 1 -type f -name '*.zl' | wc -l)" -eq 0 ]; then
+    : > "$out"
+    echo "fastazl: wrote $out (0 bytes)" >&2
+    return 0
+  fi
+
+  find "$work/chunks" -maxdepth 1 -type f -name '*.zl' -print0 \
+    | xargs -0 -P "$threads" -I{} "$ZLI" decompress "{}" --output "{}.dec" --force >/dev/null 2>&1 \
+    || die "chunk decompression failed"
+  # Reassembly used to be one single-threaded pass over every chunk, and it was
+  # the whole decompression cost: 88% of one core while the other fifteen idled,
+  # 44 s of a 44 s decompress on GRCh38. Chunks are cut on record boundaries and
+  # each decodes to exactly its own byte range, so they decode independently and
+  # concatenate in index order. --decode-one already existed for this.
+  local dec=() c
+  while IFS= read -r c; do dec+=("$c"); done < <(
+    find "$work/chunks" -maxdepth 1 -type f -name '*.zl.dec' | sort)
+  if [ "${#dec[@]}" -eq 0 ]; then
+    die "reassembly failed: no decoded chunks"
+  fi
+  printf '%s\n' "${dec[@]}" \
+    | xargs -P "$threads" -I{} "$POST" --decode-one {} {}.fa >/dev/null 2>&1 \
+    || die "reassembly failed"
+  : > "$out"
+  for c in "${dec[@]}"; do
+    cat "$c.fa" >> "$out" || die "reassembly failed: concatenating $c"
+    rm -f "$c.fa"
+  done
+  echo "fastazl: wrote $out ($(stat -c%s "$out") bytes)" >&2
+}
+
+cmd_info() {
+  [ $# -eq 1 ] || die "usage: fastazl info <in.fazl>"
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/fastazl.XXXXXX")"
+  trap 'rm -rf "$work"' RETURN
+  tar -C "$work" -xf "$1" FORMAT manifest 2>/dev/null || die "not a fastazl archive: $1"
+  echo "format: $(cat "$work/FORMAT")"
+  cat "$work/manifest"
+  echo "size:   $(stat -c%s "$1") bytes"
+}
+
+sub="${1:-}"; shift 2>/dev/null || true
+case "$sub" in
+  compress)   cmd_compress "$@";;
+  decompress) cmd_decompress "$@";;
+  info)       cmd_info "$@";;
+  ""|-h|--help|help)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//';;
+  *) die "unknown command '$sub' (try: compress decompress info)";;
+esac

@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# nyx — lossless, format-aware compression for FASTA, FASTQ, VCF and BED files.
+#
+# Usage:
+#   nyx compress   <file> [out.nyx]   compress; writes <file>.nyx if out is omitted
+#   nyx decompress <file.nyx> [out]   restore the original bytes
+#   nyx info       <file>             what NYX makes of a file
+#   nyx test       <file>             compress, decompress, compare; keeps nothing
+#
+# Options:
+#   --threads N       worker threads (default: all cores)
+#   --max-mem-mb N    memory budget in MB (default: 4000 FASTA/BED, 500 FASTQ,
+#                     VCF sizes its blocks at 64 MB unless a budget is given)
+#   --verify          decompress the archive and compare it with the input
+#   --force, -f       overwrite the output file if it exists
+#   --format F        vcf | fasta | fastq | bed, if detection gets it wrong
+#   --quiet, -q       only report errors
+#   --version, -V     print the version
+#
+# One input file gives one output file, whatever the thread count. The format is
+# read from the file's contents, never from its name: a VCF called .txt is still
+# a VCF, and gzip-compressed input is seen through. Archives are recognised the
+# same way, so a renamed archive still decompresses.
+set -uo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+VERSION="1.0.0"
+
+die() { echo "nyx: $*" >&2; exit 1; }
+say() { [ "$QUIET" = 1 ] || echo "$*"; }
+
+usage() {
+  awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}"
+}
+
+# Every binary the entry point can dispatch to, with the build command to run if
+# one is missing -- an exec failure on its own is not something a user can act on.
+need() {
+  [ -x "$1" ] || die "$(basename "$1") is not built.
+Run:  bash $HERE/scripts/build_all.sh"
+}
+
+# Reads the first bytes, transparently through gzip/bgzip, and names the format.
+detect_format() {
+  local f="$1" head
+  if [ "$(od -An -tx1 -N2 "$f" 2>/dev/null | tr -d ' \n')" = "1f8b" ]; then
+    # strip NULs: a binary file otherwise makes bash warn on the substitution
+    head=$(gzip -dc "$f" 2>/dev/null | head -c 65536 | tr -d '\0')
+  else
+    head=$(head -c 65536 "$f" 2>/dev/null | tr -d '\0')
+  fi
+  case "$head" in
+    "##fileformat=VCF"*)   echo vcf;   return;;
+    ">"*|";"*)             echo fasta; return;;
+    "@"*)                  echo fastq; return;;
+  esac
+  # tab-separated table with integer columns 2 and 3 -> BED-like
+  if printf '%s' "$head" | awk -F'\t' 'NF>=3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {ok=1} END{exit !ok}'; then
+    echo bed; return
+  fi
+  echo unknown
+}
+
+# Archives are identified by their own magic, not by file extension.
+archive_format() {
+  # od, not head|tr: a NUL in the magic makes bash warn on command substitution
+  local m; m=$(od -An -c -N8 "$1" 2>/dev/null | tr -dc 'A-Za-z0-9')
+  case "$m" in
+    NYXVCF*)  echo vcf;   return;;   # tools/nyx_vcf
+    NYXBED*)  echo bed;   return;;   # tools/nyx_bed
+    NYXZCHK*) echo fastq; return;;   # openzl/nyxfqz_v2
+  esac
+  # The FASTA archive is a single tar holding the packed chunks and a FORMAT
+  # member. Read the member list into a variable first: piping it into `grep -q`
+  # makes grep exit on the first match, tar die of SIGPIPE, and `pipefail` report
+  # the whole test as failed -- which happens only when the archive has enough
+  # chunks for tar to still be writing, i.e. only on machines with many cores.
+  local names; names=$(tar -tf "$1" 2>/dev/null)
+  case "$names" in
+    FORMAT$'\n'*|*$'\n'FORMAT$'\n'*) echo fasta; return;;
+  esac
+  echo unknown
+}
+
+compress_to() {           # compress_to <format> <in> <out>
+  local fmt="$1" in="$2" out="$3" a=()
+  case "$fmt" in
+    vcf)   need "$HERE/tools/nyx_vcf"
+           a=(compress --threads "$THREADS" --models "$HERE/artifacts/nyx_vcf_models")
+           [ -n "$MEM" ] && a+=(--max-mem-mb "$MEM")
+           [ "$QUIET" = 1 ] && a+=(--quiet)
+           run "$HERE/tools/nyx_vcf" "${a[@]}" "$in" "$out";;
+    fasta) need "$HERE/scripts/fastazl"; need "$HERE/tools/biocompress_preprocessor"
+           a=(compress "$in" "$out" --threads "$THREADS")
+           [ -n "$MEM" ] && a+=(--max-mem-mb "$MEM")
+           run "$HERE/scripts/fastazl" "${a[@]}";;
+    fastq) need "$HERE/openzl/nyxfqz_v2"
+           run "$HERE/openzl/nyxfqz_v2" compress "$HERE/artifacts/fastq_models" \
+                "$in" "$out" "$THREADS" "${MEM:-500}";;
+    bed)   need "$HERE/tools/nyx_bed"
+           a=(compress "$in" "$out" --threads "$THREADS")
+           [ -n "$MEM" ] && a+=(--max-mem-mb "$MEM")
+           [ "$QUIET" = 1 ] && a+=(--quiet)
+           run "$HERE/tools/nyx_bed" "${a[@]}";;
+    *) die "unsupported format: $fmt";;
+  esac
+}
+
+decompress_to() {         # decompress_to <format> <archive> <out>
+  local fmt="$1" in="$2" out="$3"
+  case "$fmt" in
+    vcf)   need "$HERE/tools/nyx_vcf";   run "$HERE/tools/nyx_vcf" decompress --threads "$THREADS" "$in" "$out";;
+    fasta) need "$HERE/scripts/fastazl"; run "$HERE/scripts/fastazl" decompress "$in" "$out" --threads "$THREADS";;
+    fastq) need "$HERE/openzl/nyxfqz_v2"; run "$HERE/openzl/nyxfqz_v2" decompress "$in" "$out";;
+    bed)   need "$HERE/tools/nyx_bed";   run "$HERE/tools/nyx_bed" decompress --threads "$THREADS" "$in" "$out";;
+    *) die "could not identify the archive type of $in (use --format)";;
+  esac
+}
+
+# A full round trip, not a per-block check: decompress the archive that was just
+# written and compare it with the input, byte for byte.
+verify_archive() {        # verify_archive <format> <archive> <original>
+  local fmt="$1" arc="$2" orig="$3" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/nyx-verify.XXXXXX")"
+  if ! decompress_to "$fmt" "$arc" "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; die "verification failed: $arc did not decompress"
+  fi
+  if cmp -s "$orig" "$tmp"; then
+    rm -f "$tmp"; say "verified: decompresses to the original, byte for byte"
+  else
+    rm -f "$tmp"; die "verification failed: $arc does not reproduce $orig"
+  fi
+}
+
+# Run a tool. With --quiet its progress output is held back, and shown only if
+# it fails -- silencing a tool that is about to fail would hide the reason.
+run() {
+  if [ "$QUIET" != 1 ]; then "$@"; return $?; fi
+  local log rc
+  log="$(mktemp "${TMPDIR:-/tmp}/nyx-log.XXXXXX")"
+  "$@" >"$log" 2>&1; rc=$?
+  [ $rc -eq 0 ] || cat "$log" >&2
+  rm -f "$log"; return $rc
+}
+
+human() { awk -v b="$1" 'BEGIN{ s="B KB MB GB TB"; split(s,u," "); i=1;
+  while (b>=1024 && i<5) { b/=1024; i++ } printf (i==1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
+
+CMD="${1:-}"; shift 2>/dev/null || true
+THREADS=""; VERIFY=0; MEM=""; QUIET=0; FMT=""; FORCE=0; POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --threads)    THREADS="${2:-}"; shift 2;;
+    --max-mem-mb) MEM="${2:-}"; shift 2;;
+    --format)     FMT="${2:-}"; shift 2;;
+    --verify)     VERIFY=1; shift;;
+    --force|-f)   FORCE=1; shift;;
+    --quiet|-q)   QUIET=1; shift;;
+    --version|-V) echo "nyx $VERSION"; exit 0;;
+    -h|--help)    usage; exit 0;;
+    -*)           die "unknown option: $1 (nyx --help)";;
+    *)            POS+=("$1"); shift;;
+  esac
+done
+: "${THREADS:=${SLURM_CPUS_ON_NODE:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}}"
+
+case "$CMD" in
+  compress)
+    [ "${#POS[@]}" -ge 1 ] || die "usage: nyx compress <file> [out.nyx]"
+    IN="${POS[0]}"; [ -f "$IN" ] || die "no such file: $IN"
+    FMT="${FMT:-$(detect_format "$IN")}"
+    [ "$FMT" = unknown ] && die "could not tell what kind of file $IN is.
+Give the format:  nyx compress $IN --format vcf|fasta|fastq|bed"
+    OUT="${POS[1]:-$IN.nyx}"
+    [ -e "$OUT" ] && [ "$FORCE" = 0 ] && die "$OUT exists (use --force to overwrite)"
+    compress_to "$FMT" "$IN" "$OUT" || die "compression failed"
+    [ -s "$OUT" ] || die "compression produced no output"
+    [ "$VERIFY" = 1 ] && verify_archive "$FMT" "$OUT" "$IN"
+    IB=$(stat -c%s "$IN"); OB=$(stat -c%s "$OUT")
+    say "$(basename "$IN") ($FMT): $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')  -> $OUT"
+    ;;
+  decompress)
+    [ "${#POS[@]}" -ge 1 ] || die "usage: nyx decompress <file.nyx> [out]"
+    IN="${POS[0]}"; [ -f "$IN" ] || die "no such file: $IN"
+    AFMT="${FMT:-$(archive_format "$IN")}"
+    [ "$AFMT" = unknown ] && die "$IN is not a NYX archive (or use --format)"
+    if [ "${#POS[@]}" -ge 2 ]; then OUT="${POS[1]}"
+    else
+      case "$IN" in
+        *.nyx) OUT="${IN%.nyx}";;
+        *)     OUT="$IN.out";;
+      esac
+      [ "$OUT" = "$IN" ] && OUT="$IN.out"
+    fi
+    [ -e "$OUT" ] && [ "$FORCE" = 0 ] && die "$OUT exists (use --force to overwrite)"
+    decompress_to "$AFMT" "$IN" "$OUT" || die "decompression failed"
+    say "$(basename "$IN") ($AFMT): restored to $OUT ($(human "$(stat -c%s "$OUT")"))"
+    ;;
+  test)
+    [ "${#POS[@]}" -eq 1 ] || die "usage: nyx test <file>"
+    IN="${POS[0]}"; [ -f "$IN" ] || die "no such file: $IN"
+    FMT="${FMT:-$(detect_format "$IN")}"
+    [ "$FMT" = unknown ] && die "could not tell what kind of file $IN is (use --format)"
+    TMP="$(mktemp -d "${TMPDIR:-/tmp}/nyx-test.XXXXXX")"
+    trap 'rm -rf "$TMP"' EXIT
+    compress_to "$FMT" "$IN" "$TMP/a.nyx" >/dev/null 2>&1 || die "compression failed"
+    decompress_to "$FMT" "$TMP/a.nyx" "$TMP/b" >/dev/null 2>&1 || die "decompression failed"
+    cmp -s "$IN" "$TMP/b" || die "MISMATCH: $IN does not survive the round trip"
+    IB=$(stat -c%s "$IN"); OB=$(stat -c%s "$TMP/a.nyx")
+    echo "$(basename "$IN") ($FMT): byte-exact round trip, $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')"
+    ;;
+  info)
+    [ "${#POS[@]}" -eq 1 ] || die "usage: nyx info <file>"
+    F="${POS[0]}"; [ -f "$F" ] || die "no such file: $F"
+    A=$(archive_format "$F")
+    echo "file:  $F ($(human "$(stat -c%s "$F")"))"
+    if [ "$A" != unknown ]; then
+      echo "this is a NYX $A archive; restore it with:  nyx decompress $F"
+    else
+      D=$(detect_format "$F")
+      if [ "$D" = unknown ]; then
+        echo "format: not recognised (NYX handles FASTA, FASTQ, VCF and BED)"
+      else
+        echo "format: $D; compress it with:  nyx compress $F"
+      fi
+    fi
+    ;;
+  ""|-h|--help|help) usage;;
+  -V|--version) echo "nyx $VERSION";;
+  *) die "unknown command '$CMD' (compress, decompress, test, info)";;
+esac

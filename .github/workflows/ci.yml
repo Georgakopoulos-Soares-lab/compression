@@ -1,0 +1,78 @@
+name: build-and-verify
+
+# The claim this repository makes is that every round trip is byte-exact, so CI
+# builds the tools and runs the round-trip suites. The hostile-input corpus is
+# the important half: a fallback that silently corrupts is worse than one that
+# refuses, and that failure mode has happened here before.
+
+on:
+  push:
+    branches: [ main, unified-openzl-layout ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake zlib1g-dev pigz xz-utils zstd
+
+      - name: Cache the OpenZL checkout and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            openzl
+          key: openzl-${{ hashFiles('scripts/get_openzl.sh', 'scripts/patch_openzl.sh') }}
+
+      - name: Build
+        run: |
+          export OMP_NUM_THREADS=2
+          bash scripts/build_all.sh
+
+      - name: "VCF round trip (155 cases - edge cases x switches + hostile inputs)"
+        run: |
+          export OMP_NUM_THREADS=2
+          bash tests/test_vcf_roundtrip.sh
+
+      - name: "FASTA/FASTQ round trip (36 awkward and hostile inputs)"
+        run: |
+          export OMP_NUM_THREADS=2
+          bash tests/test_seq_roundtrip.sh --via nyx
+          bash tests/test_seq_roundtrip.sh --via native
+
+      - name: "BED round trip (49 awkward and hostile inputs, every column width)"
+        run: |
+          export OMP_NUM_THREADS=2
+          bash tests/test_bed_roundtrip.sh
+
+      - name: Single entry point handles every format byte-exactly
+        run: |
+          set -euo pipefail
+          export OMP_NUM_THREADS=2
+          T=$(mktemp -d)
+          printf '>c1 t\nACGTNNNNacgtACGT\nACGT\n>c2\nGGGGCCCC\n' > "$T/x.fa"
+          printf '@r1\nACGTACGTAC\n+\nIIIIIIIIII\n@r2\nTTTTGGGGCC\n+\nJJJJJJJJJJ\n' > "$T/x.fastq"
+          cp tests/vcf_edge_cases/gt_shapes.vcf "$T/x.vcf"
+          printf 'chr1\t100\t200\tp1\t0\t+\nchr1\t300\t450\tp2\t7\t-\n' > "$T/x.bed"
+          for f in "$T/x.vcf" "$T/x.fa" "$T/x.fastq" "$T/x.bed"; do
+            ./nyx compress --threads 2 --quiet "$f" "$f.z"
+            ./nyx decompress --threads 2 "$f.z" "$f.rt"
+            cmp "$f" "$f.rt" || { echo "ROUND TRIP FAILED: $f"; exit 1; }
+            echo "ok  $(basename "$f")"
+          done
+
+      - name: Compression is actually happening
+        run: |
+          set -euo pipefail
+          export OMP_NUM_THREADS=2
+          in=tests/vcf_edge_cases/sites_only.vcf
+          ./nyx compress --threads 2 --quiet "$in" /tmp/ci.nvcf
+          a=$(stat -c%s "$in"); b=$(stat -c%s /tmp/ci.nvcf)
+          echo "$a -> $b"
+          [ "$b" -lt "$a" ] || { echo "archive is not smaller than the input"; exit 1; }

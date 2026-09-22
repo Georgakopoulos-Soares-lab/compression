@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATA_DIR="${DATA_DIR:-$HERE/data/vcf}"
+DATA_DIR="${DATA_DIR:-$HERE/data/benchmark}"
 mkdir -p "$DATA_DIR"
 
 # ---------- ClinVar ----------
@@ -32,7 +32,7 @@ echo "Downloaded VCF files:"
 echo "  ClinVar:  $CLINVAR_GZ"
 echo "  1000G:    $KG_GZ"
 echo ""
-echo "Next: preprocess with vcf_preprocessing, e.g.:"
+echo "Next: compress with nyx_vcf, e.g.:"
 echo "  gunzip $KG_GZ"
-echo "  ./tools/vcf_preprocessing $DATA_DIR/ALL.chr22.vcf out/vcf_pack \\"
-echo "      --threads 16 --target-mib 800 --max-chunk-mib 40 --force"
+echo "  ./tools/nyx_vcf compress $DATA_DIR/ALL.chr22.vcf out.nvcf \"
+echo "      --models artifacts/nyx_vcf_models --verify"

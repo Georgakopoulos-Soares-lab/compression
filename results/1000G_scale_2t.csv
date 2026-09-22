@@ -1,2 +1,0 @@
-File,Type,Schema/Format,Original_MB,ZSTD_Ratio,ZSTD_Comp_sec,ZSTD_Decomp_sec,ZSTD_Valid,GZIP_Ratio,GZIP_Comp_sec,GZIP_Decomp_sec,GZIP_Valid,XZ_Ratio,XZ_Comp_sec,XZ_Decomp_sec,XZ_Valid,Genozip_Ratio,Genozip_Comp_sec,Genozip_Decomp_sec,Genozip_Valid,SPRING_Ratio,SPRING_Comp_sec,SPRING_Decomp_sec,SPRING_Valid,OpenZL_Ratio,OpenZL_Comp_sec,OpenZL_Decomp_sec,OpenZL_Valid
-ALL.chr22.vcf,VCF,"2513 Cols, Phased",10692.95,169.9,219.14,20.97,PASS,70.4,356.99,27.99,PASS,171.57,275.25,34.08,PASS,216.43,296.89,145.87,PASS,FAIL,0.01,0.0,FAIL,212.57,124.54,96.95,PASS
