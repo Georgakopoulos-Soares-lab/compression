@@ -2,9 +2,9 @@
 
 **Scope:** the NYX FASTQ codec, now part of the `compression` repo (source `tools/nyx/`, scripts `scripts/fastq/`).
 **Compute target:** Stampede3 pvc partition (Intel, `-A BCS25105`)
-**Build:** `bash scripts/fastq/build_nyxfqz.sh` -> binary at `openzl/nyxfqz_v2` (v2 is current; v1 `tools/nyx/nyxfqz.cpp` is the frozen reference)
+**Build:** `bash scripts/fastq/build_nyxfqz.sh` -> binary at `openzl/nyxfqz_v2`. The source is `tools/nyx/nyxfqz_v2.cpp`; `scripts/build_all.sh` runs this step too.
 **OpenZL:** `openzl/` @ `d262127` (0.2.5) — the SAME checkout the FASTA and VCF pipelines build against; pinned by `scripts/get_openzl.sh`.
-**Paper benchmark:** `sbatch batch_files/benchmark_fastq.slurm` (from the parent `compression` repo; builds nyxfqz_v2 + runs; results -> `results/benchmark_fastq_<jobid>.txt`). Baseline args match the FASTA/VCF benchmarks.
+**Paper benchmark:** `bash scripts/fastq/benchmark_fastq.sh --threads 16` (results -> `results/fastq_bench.csv`). Baseline arguments match the FASTA, VCF and BED benchmarks.
 
 ## Memory (2026-08-30)
 
@@ -22,7 +22,7 @@ not yet streamed.
 ## Architecture
 
 - **NYX** uses Meta's OpenZL ML-compression framework
-- `openzl/nyx/nyxfqz.cpp` — single source (~2200 lines): pack/compress/decompress/train
+- `tools/nyx/nyxfqz_v2.cpp` — single source: pack/compress/decompress/train, staged into `openzl/nyx/` at build time
 - `packFastq()` — converts raw FASTQ bytes to a tagged container with separate streams for SEQ, QUAL, IDs
 - `unpackContainer()` — inverse of packFastq; reconstructs raw FASTQ
 - Compression: `compressChunkBytes(compressor, raw)` -> calls packFastq -> OpenZL ML model
@@ -152,7 +152,7 @@ Arena limit is on TOTAL corpus bytes across samples, not read count (~14-25MB).
 
 - cmake downloaded to `.tools/cmake-3.30.5-linux-x86_64/` (Stampede3 has no system cmake)
 - `scripts/fastq/build_nyxfqz.sh` finds that cmake if present
-- Custom OpenZL files preserved via `rsync --exclude`: `openzl/nyx/nyxfqz.cpp`, `openzl/build-scripts/make/zldefs.make`, `openzl/nyxfqz.make`
+- Custom OpenZL files preserved via `rsync --exclude`: `openzl/nyx/nyxfqz_v2.cpp`, `openzl/build-scripts/make/zldefs.make`, `openzl/nyxfqz_v2.make`
 
 ## Key Environment Variables
 

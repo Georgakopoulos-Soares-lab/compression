@@ -27,14 +27,9 @@ hs37d5.ref.genozip
 # Compiled binaries (rebuilt by scripts/build_all.sh / scripts/build_harc.sh)
 # =============================================================================
 /tools/biocompress_preprocessor
-/tools/bed_preprocess
-/tools/fastq_preprocess
-/tools/vcf_preprocessing
-/tools/vcf_postprocess
-/tools/vcf_field_codec
-/tools/harc_preprocessor
-/tools/vcf_gtcodec
-/tools/harc_decode
+/tools/fasta_postprocess
+/tools/nyx_vcf
+/tools/nyx_bed
 *.o
 core
 core.*
@@ -99,3 +94,11 @@ profiler_*.out
 !/paper/.gitkeep
 !/paper/README.md
 /docs/*.docx
+/data
+__pycache__/
+
+# Test corpora are generated deterministically by tests/make_*.py (fixed seeds)
+# and are 25 MB+ of synthetic data; the generators are the source of truth.
+tests/seq_cases/
+tests/vcf_edge_cases/
+tests/vcf_hostile/

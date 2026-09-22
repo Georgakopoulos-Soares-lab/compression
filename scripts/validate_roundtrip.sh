@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # validate_roundtrip.sh — byte-exact round-trip check for the FASTA (FAV5) and
-# VCF (vcfzl) codecs over a diverse corpus. Prints a pass/fail table and exits
+# VCF (nyx_vcf) codecs over a diverse corpus. Prints a pass/fail table and exits
 # non-zero if anything is not byte-identical.
 #
 #   scripts/validate_roundtrip.sh [--corpus DIR] [--threads N]
@@ -8,7 +8,7 @@
 # FASTA path : biocompress_preprocessor (FAV5) -> fasta_postprocess -> cmp
 #              plus a full pipeline check (+ zli serial compress/decompress) on
 #              the larger inputs.
-# VCF path   : vcfzl compress --archetype auto --verify  (self-checks the round
+# VCF path   : nyx_vcf compress --verify  (self-checks the round
 #              trip internally) -> decompress -> cmp
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do case "$1" in
 PRE="$HERE/tools/biocompress_preprocessor"
 FPOST="$HERE/tools/fasta_postprocess"
 ZLI="$HERE/openzl/zli"
-VCFZL="$HERE/scripts/vcf/vcfzl"
+NYXVCF="$HERE/tools/nyx_vcf"
 W="$(mktemp -d "${TMPDIR:-/tmp}/vrt.XXXXXX")"; trap 'rm -rf "$W"' EXIT
 
 pass=0; fail=0
@@ -49,16 +49,16 @@ for f in "$CORPUS"/fasta/*; do
 done
 
 echo
-echo "=================== VCF (vcfzl) round trip ==================="
+echo "=================== VCF (nyx_vcf) round trip ==================="
 for f in "$CORPUS"/vcf/* "$HERE"/data/vcf/derived_trio3.vcf "$HERE"/data/vcf/seqc2_hcc1395_ssnv.vcf.gz; do
   case "$f" in *.gz) continue;; esac
   [ -f "$f" ] || continue
   n="$(basename "$f")"
-  if "$VCFZL" compress --archetype auto --verify --threads "$THREADS" "$f" "$W/a.vcfz" >/dev/null 2>&1 \
-     && "$VCFZL" decompress --threads "$THREADS" "$W/a.vcfz" "$W/rt.vcf" >/dev/null 2>&1 \
+  if "$NYXVCF" compress --verify --threads "$THREADS" --models "$HERE/artifacts/nyx_vcf_models" "$f" "$W/a.nvcf" >/dev/null 2>&1 \
+     && "$NYXVCF" decompress --threads "$THREADS" "$W/a.nvcf" "$W/rt.vcf" >/dev/null 2>&1 \
      && cmp -s "$f" "$W/rt.vcf"; then r=OK; else r=FAIL; fi
   row "$r" "$n" "compress --verify / decompress / cmp"; check "$r"
-  rm -f "$W/a.vcfz" "$W/rt.vcf"
+  rm -f "$W/a.nvcf" "$W/rt.vcf"
 done
 
 echo

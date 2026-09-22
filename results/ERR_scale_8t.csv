@@ -1,2 +1,0 @@
-File,Type,Schema/Format,Original_MB,ZSTD_Ratio,ZSTD_Comp_sec,ZSTD_Decomp_sec,ZSTD_Valid,GZIP_Ratio,GZIP_Comp_sec,GZIP_Decomp_sec,GZIP_Valid,XZ_Ratio,XZ_Comp_sec,XZ_Decomp_sec,XZ_Valid,Genozip_Ratio,Genozip_Comp_sec,Genozip_Decomp_sec,Genozip_Valid,SPRING_Ratio,SPRING_Comp_sec,SPRING_Decomp_sec,SPRING_Valid,OpenZL_Ratio,OpenZL_Comp_sec,OpenZL_Decomp_sec,OpenZL_Valid
-ERR9539086_500M.fastq,FASTQ,Short Read (~96bp),505.16,6.09,34.18,1.35,PASS,5.05,10.44,2.06,PASS,6.32,147.58,5.35,PASS,0,1.71,0.51,FAIL,7.45,17.53,7.9,PASS,8.13,0.94,4.03,PASS

@@ -1,0 +1,13 @@
+file,archetype,orig_bytes,budget_mb,block_mb,comp_bytes,ratio,peak_RSS_MB,comp_sec,roundtrip
+"1000G.chr22.phase3.vcf",panel,11212370718,0,64,25966385,431.803,2982.41,58.40,OK
+"1000G.chr22.phase3.vcf",panel,11212370718,1000,8,33186926,337.855,760.77,53.60,OK
+"1000G.chr22.phase3.vcf",panel,11212370718,2000,16,29395209,381.435,1104.05,40.30,OK
+"1000G.chr22.phase3.vcf",panel,11212370718,4000,31,27195370,412.290,1979.58,38.39,OK
+"seqc2_hcc1395_ssnv_superset.vcf",somatic,1492470879,0,64,230455118,6.476,7451.39,15.09,OK
+"seqc2_hcc1395_ssnv_superset.vcf",somatic,1492470879,1000,8,242102633,6.165,1391.64,9.94,OK
+"seqc2_hcc1395_ssnv_superset.vcf",somatic,1492470879,2000,16,235886544,6.327,2513.08,10.31,OK
+"seqc2_hcc1395_ssnv_superset.vcf",somatic,1492470879,4000,31,232674053,6.414,4262.99,10.89,OK
+"gnomad_v4.1_genomes_chrY.vcf",sites-frequency,4629640924,0,64,239901002,19.298,6057.85,22.02,OK
+"gnomad_v4.1_genomes_chrY.vcf",sites-frequency,4629640924,1000,8,256506328,18.049,1383.99,16.71,OK
+"gnomad_v4.1_genomes_chrY.vcf",sites-frequency,4629640924,2000,16,247891600,18.676,2279.28,17.03,OK
+"gnomad_v4.1_genomes_chrY.vcf",sites-frequency,4629640924,4000,31,243326062,19.026,3516.89,15.66,OK

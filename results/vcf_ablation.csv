@@ -1,0 +1,49 @@
+file,archetype,stage,orig_bytes,comp_bytes,ratio,roundtrip
+"1000G.chr22.200k.vcf",panel,"OpenZL generic (no format awareness)",2032176394,22938064,88.594,OK
+"1000G.chr22.200k.vcf",panel,"+ column split",2032176394,10850570,187.288,OK
+"1000G.chr22.200k.vcf",panel,"+ per-INFO-key streams",2032176394,10532659,192.940,OK
+"1000G.chr22.200k.vcf",panel,"+ value transforms",2032176394,10349310,196.359,OK
+"1000G.chr22.200k.vcf",panel,"+ text dictionaries",2032176394,10088198,201.441,OK
+"1000G.chr22.200k.vcf",panel,"+ annotation split",2032176394,10088198,201.441,OK
+"1000G.chr22.200k.vcf",panel,"+ haplotype PBWT",2032176394,5606704,362.455,OK
+"1000G.chr22.200k.vcf",panel,"+ trained models",2032176394,5434546,373.937,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"OpenZL generic (no format awareness)",2836801603,119243782,23.790,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ column split",2836801603,86178666,32.918,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ per-INFO-key streams",2836801603,86647012,32.740,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ value transforms",2836801603,81930825,34.624,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ text dictionaries",2836801603,57293695,49.513,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ annotation split",2836801603,57293695,49.513,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ haplotype PBWT",2836801603,57300566,49.507,OK
+"HG002_GRCh38_v4.2.1.vcf",single-sample,"+ trained models",2836801603,57110183,49.672,OK
+"clinvar_GRCh38.vcf",sites-annotated,"OpenZL generic (no format awareness)",1939342821,172641716,11.233,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ column split",1939342821,157149581,12.341,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ per-INFO-key streams",1939342821,128945490,15.040,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ value transforms",1939342821,125978009,15.394,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ text dictionaries",1939342821,115288143,16.822,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ annotation split",1939342821,115288143,16.822,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ haplotype PBWT",1939342821,115288129,16.822,OK
+"clinvar_GRCh38.vcf",sites-annotated,"+ trained models",1939342821,115039149,16.858,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"OpenZL generic (no format awareness)",41422938,5234679,7.913,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ column split",41422938,3420022,12.112,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ per-INFO-key streams",41422938,3325218,12.457,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ value transforms",41422938,2344438,17.669,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ text dictionaries",41422938,2294954,18.050,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ annotation split",41422938,2294954,18.050,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ haplotype PBWT",41422938,2294956,18.050,OK
+"gvcf_nfcore_test2.g.vcf",gvcf,"+ trained models",41422938,2261611,18.316,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"OpenZL generic (no format awareness)",59471898,3480946,17.085,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ column split",59471898,3323547,17.894,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ per-INFO-key streams",59471898,2403640,24.742,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ value transforms",59471898,2138121,27.815,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ text dictionaries",59471898,1933814,30.754,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ annotation split",59471898,1933814,30.754,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ haplotype PBWT",59471898,1933814,30.754,OK
+"seqc2_hcc1395_ssnv.vcf",somatic,"+ trained models",59471898,1931224,30.795,OK
+"civic_nightly.vcf",sites-annotated,"OpenZL generic (no format awareness)",3567757,222406,16.042,OK
+"civic_nightly.vcf",sites-annotated,"+ column split",3567757,218539,16.325,OK
+"civic_nightly.vcf",sites-annotated,"+ per-INFO-key streams",3567757,216799,16.457,OK
+"civic_nightly.vcf",sites-annotated,"+ value transforms",3567757,216186,16.503,OK
+"civic_nightly.vcf",sites-annotated,"+ text dictionaries",3567757,216589,16.472,OK
+"civic_nightly.vcf",sites-annotated,"+ annotation split",3567757,207919,17.159,OK
+"civic_nightly.vcf",sites-annotated,"+ haplotype PBWT",3567757,207917,17.160,OK
+"civic_nightly.vcf",sites-annotated,"+ trained models",3567757,207728,17.175,OK

@@ -1,4 +1,0 @@
-File,Read_Length,Original_MB,ZSTD_Raw_Ratio,OpenZL_Ratio,OpenZL_Time_sec
-ERR9539086_500M.fastq,150,1116.06,9.8,11.73,11.12
-SRR8899104_500M.fastq,51,524.27,5.92,8.54,7.8
-ERR9539086_500M_no_xy.fastq,150,1116.06,9.8,11.26,8.17

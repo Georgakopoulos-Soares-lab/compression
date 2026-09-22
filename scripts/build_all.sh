@@ -21,7 +21,12 @@ cd "$HERE/openzl"
 # Also: user-provided *FLAGS from the environment can override OpenZL's
 # required C++ standard settings. We explicitly unset them for reproducibility.
 env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u LDLIBS \
-  make -j"${JOBS:-$(nproc)}" MOREFLAGS="-pthread"
+  make -j"${JOBS:-${SLURM_CPUS_ON_NODE:-$(nproc)}}" MOREFLAGS="-pthread"
+
+# nyx_vcf links against OpenZL directly rather than shelling out to zli, so it
+# needs the static library as well as the CLI.
+env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u LDLIBS \
+  make -j"${JOBS:-${SLURM_CPUS_ON_NODE:-$(nproc)}}" MOREFLAGS="-pthread" lib
 
 if [ ! -x "$HERE/openzl/zli" ]; then
   echo "Error: expected executable not found: $HERE/openzl/zli"
@@ -42,42 +47,34 @@ g++ -O2 -std=c++17 \
   -o "$HERE/tools/fasta_postprocess" \
   "$HERE/tools/fasta_postprocess.cpp"
 
-# 4) Build the BED preprocessor
-g++ -O2 -std=c++17 \
-  -o "$HERE/tools/bed_preprocess" \
-  "$HERE/tools/bed_preprocess.cpp"
-
-# 5) Build the FASTQ preprocessor (parallel, uses std::thread)
-g++ -O2 -std=c++17 -pthread \
-  -o "$HERE/tools/fastq_preprocess" \
-  "$HERE/tools/fastq_preprocess.cpp"
-
-# 6) Build the VCF preprocessor (header/body split + chunking)
-g++ -O2 -std=c++17 -pthread \
-  -o "$HERE/tools/vcf_preprocessing" \
-  "$HERE/tools/vcf_preprocessing.cpp"
-
-# 7) Build the VCF postprocessor (reassembly from chunks)
-g++ -O2 -std=c++17 -pthread \
-  -o "$HERE/tools/vcf_postprocess" \
-  "$HERE/tools/vcf_postprocess.cpp"
-
-# 8) Build the VCF field-aware codec (reversible per-column decomposition)
+# 4) Build the BED compressor (column model + OpenZL, in-process)
 g++ -O3 -std=c++17 -pthread \
-  -o "$HERE/tools/vcf_field_codec" \
-  "$HERE/tools/vcf_field_codec.cpp"
+  -o "$HERE/tools/nyx_bed" "$HERE/tools/nyx_bed.cpp" \
+  -I"$HERE/openzl/include" -I"$HERE/openzl/src" -I"$HERE/tools" \
+  "$HERE/openzl/libopenzl.a" \
+  "$HERE/openzl/deps/zstd/lib/libzstd.a" \
+  "$HERE/openzl/deps/lz4/lib/liblz4.a" \
+  -lz
 
-# 8b) Build the VCF genotype symbol codec (reversible GT -> 1-byte coding)
-g++ -O3 -std=c++17 \
-  -o "$HERE/tools/vcf_gtcodec" \
-  "$HERE/tools/vcf_gtcodec.cpp"
+
+# 6) Build the VCF compressor (format-aware transform + OpenZL, in-process)
+g++ -O3 -std=c++17 -pthread \
+  -o "$HERE/tools/nyx_vcf" "$HERE/tools/nyx_vcf.cpp" \
+  -I"$HERE/openzl/include" -I"$HERE/openzl/src" \
+  "$HERE/openzl/libopenzl.a" \
+  "$HERE/openzl/deps/zstd/lib/libzstd.a" \
+  "$HERE/openzl/deps/lz4/lib/liblz4.a" \
+  -lz
+
+# 7) Build the FASTQ codec. It links OpenZL's whole object set rather than the
+# static library, so it has its own script; calling it here means one command
+# builds everything the `nyx` entry point can dispatch to.
+bash "$HERE/scripts/fastq/build_nyxfqz.sh" >/dev/null
 
 echo "Build OK:"
 echo "  $HERE/openzl/zli"
+echo "  $HERE/openzl/nyxfqz_v2"
 echo "  $HERE/tools/biocompress_preprocessor"
 echo "  $HERE/tools/fasta_postprocess"
-echo "  $HERE/tools/bed_preprocess"
-echo "  $HERE/tools/fastq_preprocess"
-echo "  $HERE/tools/vcf_preprocessing"
-echo "  $HERE/tools/vcf_postprocess"
-echo "  $HERE/tools/vcf_field_codec"
+echo "  $HERE/tools/nyx_bed"
+echo "  $HERE/tools/nyx_vcf"

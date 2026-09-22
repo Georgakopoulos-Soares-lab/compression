@@ -60,6 +60,8 @@ echo "Patches applied and verified."
 if [ "${PATCH_OPENZL_BUILD:-1}" = 1 ]; then
   echo "Rebuilding zli…"
   cd "$OZL" && env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u LDLIBS \
-    make -j"$(nproc)" MOREFLAGS="-pthread" zli 2>&1 | tail -3
+    # nproc reports 1 on these nodes (OMP_NUM_THREADS=1 is exported), which
+    # turned this into a single-threaded rebuild of the whole library.
+    make -j"${SLURM_CPUS_ON_NODE:-$(nproc)}" MOREFLAGS="-pthread" zli 2>&1 | tail -3
 fi
 echo "Done."

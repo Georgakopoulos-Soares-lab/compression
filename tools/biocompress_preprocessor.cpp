@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <sys/mman.h>
+#include <cstring>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,6 +38,13 @@ struct MappedFile {
             throw std::runtime_error("Could not stat file: " + path);
         }
         size = sb.st_size;
+        if (size == 0) {
+            // mmap() of a zero-length file fails with EINVAL. An empty input is
+            // legal (and a compressor that dies on one is not usable in a
+            // pipeline), so represent it as a valid pointer over no bytes.
+            data = "";
+            return;
+        }
         data = (const char*)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (data == MAP_FAILED) {
             close(fd);
@@ -47,7 +55,7 @@ struct MappedFile {
     }
 
     ~MappedFile() {
-        if (data != MAP_FAILED) {
+        if (size > 0 && data != MAP_FAILED) {
             munmap((void*)data, size);
         }
         if (fd != -1) {
@@ -55,6 +63,37 @@ struct MappedFile {
         }
     }
 };
+
+// Release a finished byte range of the mapping back to the kernel.
+//
+// The input is mapped whole and read straight through, so without this every
+// page we touch stays resident and peak RSS tracks the *file* size: 14.8 GB on
+// bread wheat, which dwarfed the 450 MiB chunk buffers we actually need. The
+// mapping is PROT_READ|MAP_PRIVATE and nothing writes to it, so dropping the
+// pages is free -- any later access simply re-reads them from the file.
+// Rounds inward to whole pages so we never discard a neighbouring chunk's data.
+static void release_range(const char* start, const char* end) {
+    static const uintptr_t pg = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t a = ((uintptr_t)start + pg - 1) & ~(pg - 1);
+    uintptr_t b = (uintptr_t)end & ~(pg - 1);
+    if (b > a) madvise((void*)a, (size_t)(b - a), MADV_DONTNEED);
+}
+
+// Debug: report peak (VmHWM) and current (VmRSS) resident size at a checkpoint.
+static void rss_note(const char* tag) {
+    if (!std::getenv("BCP_RSS_LOG")) return;
+    long hwm = 0, rss = 0;
+    if (FILE* f = fopen("/proc/self/status", "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "VmHWM:", 6)) hwm = atol(line + 6);
+            else if (!strncmp(line, "VmRSS:", 6)) rss = atol(line + 6);
+        }
+        fclose(f);
+    }
+    std::fprintf(stderr, "[rss] %-22s hwm=%ld MB  rss=%ld MB\n",
+                 tag, hwm / 1024, rss / 1024);
+}
 
 void write_u32(std::ofstream& out, uint32_t val) {
     out.write(reinterpret_cast<const char*>(&val), 4);
@@ -793,7 +832,9 @@ FileType detect_type(const char* data, size_t size) {
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <input_file> <output_dir> <num_threads> [type]" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " <input_file> <output_dir> <num_threads> [type] [max_mem_mb]"
+                  << std::endl;
         return 1;
     }
 
@@ -801,6 +842,8 @@ int main(int argc, char* argv[]) {
     std::string output_dir = argv[2];
     int num_threads = std::stoi(argv[3]);
     std::string type_str = (argc > 4) ? argv[4] : "";
+    // Optional peak-RSS budget in MB (0 = use the default chunk cap).
+    size_t max_mem_mb = (argc > 5) ? (size_t)std::stoull(argv[5]) : 0;
 
     try {
         MappedFile file(input_path);
@@ -825,6 +868,17 @@ int main(int argc, char* argv[]) {
         if (type == VCF) {
             max_chunk_bytes = 300ull * 1024ull * 1024ull; // tighter cap for VCF to avoid OpenZL allocator failures
         }
+        // Peak RSS is dominated by the chunk buffers: every worker holds one
+        // chunk's worth of packed sequence, line lengths and case runs at once,
+        // which measures at ~1x the chunk size. So a budget translates directly
+        // into a chunk cap of budget/threads. Smaller chunks give OpenZL less
+        // context, so this trades a little ratio for a bounded footprint.
+        if (max_mem_mb > 0) {
+            size_t per = (max_mem_mb * 1000000ull)
+                       / (size_t)std::max(1, num_threads);
+            max_chunk_bytes = std::min(max_chunk_bytes,
+                                       std::max<size_t>(per, 16ull << 20));
+        }
         const size_t requested_chunks = static_cast<size_t>(std::max(1, num_threads));
 
         size_t size_based_chunks = (file.size + max_chunk_bytes - 1) / max_chunk_bytes;
@@ -835,6 +889,7 @@ int main(int argc, char* argv[]) {
 
         // For very small files, boundary snapping may collapse trailing empty chunks.
 
+        const char* scanned = file.data; // high-water mark of the boundary scan
         std::vector<const char*> split_points;
         split_points.reserve(chunk_count + 1);
         split_points.push_back(file.data);
@@ -845,6 +900,17 @@ int main(int argc, char* argv[]) {
             if (target >= end) {
                 split_points.push_back(end);
                 continue;
+            }
+            // Never scan ground the previous boundary already covered. On an
+            // assembly a record is a whole chromosome, so every candidate
+            // boundary that lands inside one used to scan forward to that same
+            // chromosome's end -- quadratic page touching that set the peak
+            // (10.7 GB on bread wheat at a 2000 MB budget, and *higher* than at
+            // 4000 MB because a smaller chunk target means more candidates
+            // rescanning the same bases). Clamping makes the total scan linear.
+            const char* prev = split_points.back();
+            if (target < prev) {
+                target = prev;
             }
 
             // Adjust to record boundary
@@ -868,8 +934,20 @@ int main(int argc, char* argv[]) {
                 cursor++;
             }
             split_points.push_back(cursor);
+            // The scan above walks forward to the next record start, which on an
+            // assembly can be most of a chromosome. Doing that for every boundary
+            // faulted in 2.2 GB of a 3.3 GB genome *before* the first worker ran,
+            // which set the peak no matter how the workers were throttled. Give
+            // the scanned pages straight back; the workers re-fault the little
+            // they need from the (still warm) page cache.
+            release_range(scanned, cursor);
+            scanned = cursor;
         }
         split_points.push_back(file.data + file.size);
+        // Sweep up anything the per-boundary releases missed (kernel read-ahead
+        // runs past the byte the scan actually stopped on).
+        release_range(file.data, file.data + file.size);
+        rss_note("after split scan");
 
         // VCF Header Pre-pass
         VcfHeaderInfo vcf_header;
@@ -879,7 +957,26 @@ int main(int argc, char* argv[]) {
 
         // Launch worker threads (limit concurrency to requested num_threads while supporting extra chunks)
         const size_t total_chunks = split_points.size() - 1;
-        const size_t worker_count = std::max<size_t>(1, std::min<size_t>(total_chunks, requested_chunks));
+        size_t worker_count = std::max<size_t>(1, std::min<size_t>(total_chunks, requested_chunks));
+
+        // Chunk boundaries snap to record starts, so on an assembly the chunks
+        // cannot be made smaller than the largest record -- human chr1 alone is
+        // ~253 MB. Shrinking the cap therefore stops bounding memory at some
+        // point, and the only remaining lever is how many of those chunks are
+        // in flight. Cap the workers so that workers x largest chunk fits the
+        // budget: this makes the bound hold on any input, at the cost of
+        // concurrency on files with very large records.
+        if (max_mem_mb > 0) {
+            size_t largest = 0;
+            for (size_t i = 0; i < total_chunks; ++i) {
+                largest = std::max(largest,
+                                   (size_t)(split_points[i + 1] - split_points[i]));
+            }
+            if (largest > 0) {
+                size_t fit = (max_mem_mb * 1000000ull) / largest;
+                worker_count = std::max<size_t>(1, std::min(worker_count, fit));
+            }
+        }
         std::atomic<size_t> next_chunk{0};
 
         auto process_chunk = [&](size_t idx) {
@@ -901,6 +998,10 @@ int main(int argc, char* argv[]) {
             else if (type == FASTA) process_fasta_chunk(start, end, out_path);
             else if (type == FASTA_PACKED) process_fasta_packed_chunk(start, end, out_path);
             else if (type == VCF) process_vcf_chunk(start, end, out_path, vcf_header);
+
+            // This chunk will never be read again -- give its pages back.
+            release_range(start, end);
+            rss_note("chunk done");
         };
 
         std::vector<std::thread> threads;
@@ -916,6 +1017,7 @@ int main(int argc, char* argv[]) {
         }
 
         for (auto& t : threads) t.join();
+        rss_note("all chunks done");
         
         std::cout << "Processing complete. Output in " << output_dir << std::endl;
 

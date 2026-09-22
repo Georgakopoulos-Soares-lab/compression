@@ -19,8 +19,8 @@ bash "$ROOT/scripts/patch_openzl.sh" >/dev/null 2>&1 || true
 
 # stage the codec into the OpenZL tree
 mkdir -p "$OZL/nyx"
-cp -f "$SRC"/nyxfqz.cpp "$SRC"/nyxfqz_v2.cpp "$OZL/nyx/"
-cp -f "$SRC"/nyxfqz.make "$SRC"/nyxfqz_v2.make "$OZL/"
+cp -f "$SRC"/nyxfqz_v2.cpp "$OZL/nyx/"
+cp -f "$SRC"/nyxfqz_v2.make "$OZL/"
 
 # OpenZL only compiles the C++ dirs it knows about; add ours (idempotent)
 ZLDEFS="$OZL/build-scripts/make/zldefs.make"
@@ -37,11 +37,15 @@ fi
 
 LOCAL_CMAKE_BIN="$ROOT/.tools/cmake-3.30.5-linux-x86_64/bin"
 [ -d "$LOCAL_CMAKE_BIN" ] && export PATH="$LOCAL_CMAKE_BIN:$PATH"
-JOBS="$(nproc 2>/dev/null || echo 8)"
+# nproc reports 1 on these nodes because OMP_NUM_THREADS=1 is exported, which
+# silently made this a single-threaded build (minutes instead of seconds, and
+# long enough to perturb a benchmark running beside it). Prefer the allocation's
+# real core count.
+JOBS="${SLURM_CPUS_ON_NODE:-$(nproc 2>/dev/null || echo 8)}"
 
 cd "$OZL"
-make -j"$JOBS" zli >/dev/null 2>&1 || make -j"$JOBS" zli
-make -j"$JOBS" -f nyxfqz_v2.make nyxfqz_v2
+make -j"$JOBS" MOREFLAGS="-pthread" zli >/dev/null 2>&1 || make -j"$JOBS" MOREFLAGS="-pthread" zli
+make -j"$JOBS" MOREFLAGS="-pthread" -f nyxfqz_v2.make nyxfqz_v2
 
 [ -x "$OZL/nyxfqz_v2" ] || { echo "FATAL: nyxfqz_v2 build failed" >&2; exit 1; }
 echo ">> Done. Binary: $OZL/nyxfqz_v2"

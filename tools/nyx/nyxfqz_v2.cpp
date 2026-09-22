@@ -14,6 +14,7 @@
 // frame it produces is reversible by the universal OpenZL decompressor. Our
 // pack/unpack step is a pure byte transform independent of OpenZL, so
 // decompress(compress(x)) == x for arbitrary input.
+#include <malloc.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -73,7 +74,16 @@ namespace nyx {
 // Per-worker cost defaults to 384 MB now that the OpenZL Compressor is SHARED
 // across workers (each worker only owns a CCtx + its raw/packed chunk), was 512
 // when every worker deserialized its own Compressor. NYX_WORKER_MB overrides it.
-static unsigned memBudgetWorkers(unsigned requested, long reserveMB = 0)
+// Chooses the worker count that fits a memory budget.
+//
+// `explicitMB` is the budget the caller was given on the command line. It takes
+// precedence over the environment and over the machine's free memory: a user who
+// asks for a 500 MB run must get one on a 1 TB machine as well as on a laptop.
+// Previously this argument did not exist, the CLI's memMB only sized the chunks,
+// and the pool was sized from MemAvailable -- so the documented memory parameter
+// did not bound memory.
+static unsigned memBudgetWorkers(unsigned requested, long reserveMB = 0,
+                                 long explicitMB = -1)
 {
     if (requested < 1) requested = 1;
     unsigned perWorkerMB = 384;
@@ -82,7 +92,8 @@ static unsigned memBudgetWorkers(unsigned requested, long reserveMB = 0)
         if (v >= 32 && v <= 65536) perWorkerMB = (unsigned)v;
     }
     long budgetMB = -1;
-    if (const char* b = std::getenv("NYX_MAX_MEM_MB")) {
+    if (explicitMB > 0) budgetMB = explicitMB;
+    if (budgetMB < 0) if (const char* b = std::getenv("NYX_MAX_MEM_MB")) {
         long v = std::atol(b);
         if (v >= 512) budgetMB = v;
     }
@@ -200,6 +211,11 @@ static constexpr size_t kRecordsPerChunk = 128 * 1024;
 // chunks with different routes simultaneously.
 enum class SeqRoute : uint8_t { Unset = 0, Cluster = 1, Zstd = 2, BigLz = 3 };
 static thread_local SeqRoute g_seqRouteOverride = SeqRoute::Unset;
+
+// Entropy-backend compression level for this thread's chunk. 0 = unset, use the
+// default. Like the SEQ route this has to be thread-local, because parallel
+// workers may be calibrating different levels at the same time.
+static thread_local int g_clevelOverride = 0;
 
 // Resolve the effective SEQ route: thread-local override wins; else env vars.
 // NYX_SEQ_ROUTE=zstd|bigwindowlz and NYX_FORCE_SEQ_BIGLZ=1 are all honoured.
@@ -1824,12 +1840,55 @@ static void sortReadsInChunk(std::string& raw, int K = 20)
 // worker thread across all its chunks avoids constructing/destroying an OpenZL
 // compression context (and its work buffers) thousands of times per file --
 // that was pure overhead on both wall time and allocator churn.
+// True when packFastq parsed no records at all and stored the chunk whole in a
+// single TAG_RAW segment (see the `records == 0` branch there).
+//
+// Container framing per segment is [u32 numBytes][u8 eltWidth][u32 tag][bytes],
+// so one raw-only segment is exactly 9 bytes of framing plus the payload.
+static bool containerIsRawOnly(const std::string& c)
+{
+    if (c.size() < 9) return true;                 // nothing parseable at all
+    uint32_t numBytes;
+    std::memcpy(&numBytes, c.data(), 4);
+    uint32_t tag;
+    std::memcpy(&tag, c.data() + 5, 4);
+    return tag == TAG_RAW && (size_t)numBytes + 9 == c.size();
+}
+
+// Compress a container that the format graph cannot handle, using the plain
+// zstd graph instead. Frames are self-describing, so this decodes through the
+// same universal DCtx path as every other frame -- the archive does not need to
+// record which of the two produced it.
+static std::string compressRawContainer(openzl::CCtx& cctx, const std::string& container)
+{
+    openzl::Compressor comp;
+    openzl::unwrap(ZL_Compressor_selectStartingGraphID(comp.get(), ZL_GRAPH_ZSTD),
+                   "select zstd graph for raw container", comp.get());
+    cctx.setParameter(openzl::CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+    cctx.setParameter(openzl::CParam::CompressionLevel, 12);
+    cctx.refCompressor(comp);
+    std::string frame;
+    frame.resize(openzl::compressBound(container.size()));
+    frame.resize(cctx.compressSerial(frame, container));
+    frame.shrink_to_fit();
+    return frame;
+}
+
 static std::string compressChunkBytesCtx(
         openzl::CCtx& cctx,
         openzl::Compressor& compressor,
         const std::string& rawChunk)
 {
     std::string container = packFastq(rawChunk);
+    // A chunk with no FASTQ records in it -- a UTF-8 BOM before the first '@',
+    // or a file that is not FASTQ at all -- packs to a lone verbatim segment.
+    // The format graph dispatches on tags it then does not find and OpenZL
+    // aborts on a null stream, killing the process rather than returning an
+    // error, so there is nothing to catch. Route those through the plain zstd
+    // graph instead: the tool stays total and the bytes still round-trip.
+    if (containerIsRawOnly(container)) {
+        return compressRawContainer(cctx, container);
+    }
     cctx.setParameter(openzl::CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
     cctx.setParameter(openzl::CParam::PermissiveCompression, 1);
     // [v2] Adaptive compression level. OpenZL's zstd has a big speed CLIFF above
@@ -1840,6 +1899,7 @@ static std::string compressChunkBytesCtx(
     // ratio. NYX_CLEVEL overrides both. Measured: ERR NovaSeq L12 7.88 (>SPRING
     // 7.50) at 6x the speed of L19; clustered SRR1770413 keeps 7.27 at L19.
     int clevel = g_globalClusterActive.load() ? 19 : 12;
+    if (g_clevelOverride) clevel = g_clevelOverride;   // calibrated per file
     if (const char* cl = std::getenv("NYX_CLEVEL")) {
         int v = std::atoi(cl);
         if (v >= 1 && v <= 22) clevel = v;
@@ -1850,6 +1910,11 @@ static std::string compressChunkBytesCtx(
     frame.resize(openzl::compressBound(container.size()));
     size_t csize = cctx.compressSerial(frame, container);
     frame.resize(csize);
+    // resize() down shrinks the length but keeps the capacity, so a frame that
+    // holds 2 MB of output was still holding its whole compressBound allocation
+    // (~20 MB). Multiplied by one retained frame per chunk that was the entire
+    // memory scaling problem: 13.5 GB on an 8.4 GB input.
+    frame.shrink_to_fit();
     return frame;
 }
 
@@ -2125,9 +2190,209 @@ static ChunkPick pickForChunk(const std::string& raw)
     return pk;
 }
 
+// Candidate (model, SEQ route) pairs to try during calibration, per data type.
+// The model and the route are coupled -- a model trained with the LZ route is
+// not meaningfully testable through the zstd route -- so they are calibrated as
+// pairs, not independently.
+struct ModelCandidate { uint8_t model; SeqRoute route; int clevel; };
+
+// Entropy-backend levels to try during calibration, cheapest first. 12 is the
+// long-standing default, chosen because level 19 costs ~6x the time on NovaSeq
+// data for almost no ratio. That reasoning does not hold on a library whose
+// reads repeat: on DRR206632 (59.9% duplicate reads) level 12 reaches 9.63x and
+// level 16 reaches 11.74x. The level therefore has to be measured per file like
+// everything else, not fixed by archetype.
+static const int kCalibLevels[] = { 12, 16, 19 };
+
+// A higher level is accepted only if it is more than this much better, so the
+// calibration prefers the cheaper level whenever the gain is marginal: level 19
+// buys 1.3% over level 16 on DRR206632 for 46% more time, and that is not a
+// trade worth making by default.
+static constexpr double kLevelSlack = 0.02;
+static const ModelCandidate kIlluminaCandidates[] = {
+    { MODEL_ILL_FIXED_LZ, SeqRoute::BigLz, 0 },
+    { MODEL_ILL_VAR_LZ,   SeqRoute::BigLz, 0 },
+    { MODEL_ILL_ZSTD,     SeqRoute::Zstd,  0 },
+};
+static const ModelCandidate kNanoCandidates[] = {
+    { MODEL_NANO_LZ,   SeqRoute::BigLz, 0 },
+    { MODEL_NANO_ZSTD, SeqRoute::Zstd,  0 },
+};
+
 static const char kArchiveMagic2[8] = { 'N', 'Y', 'X', 'Z', 'C', 'H', 'K', '2' };
 
 // Directory-of-models compress path: per-chunk probe + model/route selection.
+// Choose the model AND the entropy level by measuring them, not by predicting.
+//
+// pickForChunk() infers a model from read length and minimizer sharing, and the
+// backend level was a compile-time constant. Neither inference is checked, and
+// both are wrong in the same way on the same kind of data. On DRR206632, a
+// small-RNA library that is 59.9% duplicate reads:
+//   - the picker chooses illumina_fixed+LZ, the worst and slowest of the five
+//     shipped models (5.73x / 113 s where illumina_zstdseq gives 6.68x / 62 s
+//     on a comparable library);
+//   - the fixed level 12 gives 9.63x where level 16 gives 11.74x.
+// The level 12 default was measured -- on NovaSeq data, where level 19 costs
+// six times the time for nothing. It simply does not transfer to a library
+// whose reads repeat.
+//
+// So compress one representative chunk with every (model, route, level)
+// combination and keep the winner, preferring the cheapest level whose result
+// is within kLevelSlack of the best so we do not pay for a marginal gain. The
+// combinations are independent, so they run concurrently and the calibration
+// costs roughly one chunk of wall time rather than nine. Returns false if there
+// is nothing to choose between.
+// Compress `sample` with each candidate in parallel and fill `sizes`.
+// SIZE_MAX marks a combination that could not encode this chunk; it simply
+// loses rather than aborting the calibration.
+static void probeCandidates(
+        const std::string& sample,
+        std::vector<std::unique_ptr<openzl::Compressor>>& shared,
+        const std::vector<ModelCandidate>& cands,
+        std::vector<size_t>& sizes)
+{
+    sizes.assign(cands.size(), SIZE_MAX);
+    // Each probe compresses the chunk single-threaded, so one thread per
+    // candidate would oversubscribe the box; cap the fan-out at half the cores.
+    const unsigned hw  = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned fan = std::min<unsigned>(cands.size(), std::max(1u, hw / 2));
+    std::atomic<size_t> next{ 0 };
+    std::vector<std::thread> ts;
+    ts.reserve(fan);
+    for (unsigned t = 0; t < fan; ++t) {
+        ts.emplace_back([&]() {
+            for (;;) {
+                size_t i = next.fetch_add(1);
+                if (i >= cands.size()) break;
+                try {
+                    g_seqRouteOverride = cands[i].route;
+                    g_clevelOverride   = cands[i].clevel;
+                    openzl::CCtx cctx;
+                    sizes[i] = compressChunkBytesCtx(
+                                       cctx, *shared[cands[i].model], sample)
+                                       .size();
+                } catch (const std::exception&) {
+                    sizes[i] = SIZE_MAX;
+                }
+                g_seqRouteOverride = SeqRoute::Unset;
+                g_clevelOverride   = 0;
+            }
+        });
+    }
+    for (auto& t : ts) t.join();
+}
+
+// Choose the model AND the entropy level by measuring them, not by predicting.
+//
+// pickForChunk() infers a model from read length and minimizer sharing, and the
+// backend level was a compile-time constant. Neither inference is checked, and
+// both are wrong in the same way on the same kind of data. On DRR206632, a
+// small-RNA library that is 59.9% duplicate reads, the picker chooses the worst
+// and slowest of the five shipped models, and the fixed level 12 gives 9.63x
+// where level 16 gives 11.74x. The level 12 default was itself measured -- on
+// NovaSeq data, where level 19 was held to cost six times the time for nothing.
+// Calibration disagreed even there: it picks 16 on NovaSeq too, worth 6.6%.
+//
+// Searched in two stages rather than as a full grid. The model ranking is
+// stable across levels (illumina+zstd wins at 12, 16 and 19 on both libraries
+// measured), so there is no reason to price every model at every level: pick
+// the model at the cheapest level, then sweep levels for that model alone. That
+// is 5 probes instead of 9 for Illumina, one parallel wave instead of two, and
+// it reaches the same answer. The overhead is not free -- on a 1.24 GB file the
+// full grid cost ~14 s against ~20 s of actual compression, enough to lose to
+// SPRING on wall time while still beating it on nothing.
+//
+// Returns false if there is nothing to choose between.
+static bool calibrateModel(
+        const std::string& sample,
+        std::vector<std::unique_ptr<openzl::Compressor>>& shared,
+        bool isNano,
+        ModelCandidate& winner,
+        bool verbose)
+{
+    if (const char* e = std::getenv("NYX_NO_CALIBRATE")) {
+        if (e[0] == '1') return false;
+    }
+    if (sample.empty()) return false;
+
+    // ---- stage 1: which model, priced at the cheapest level ----------------
+    std::vector<ModelCandidate> models;
+    auto add = [&](const ModelCandidate& c) {
+        if (!shared[c.model]) return;
+        ModelCandidate x = c;
+        x.clevel = kCalibLevels[0];
+        models.push_back(x);
+    };
+    if (isNano) {
+        for (const auto& c : kNanoCandidates) add(c);
+    } else {
+        for (const auto& c : kIlluminaCandidates) add(c);
+    }
+    if (models.empty()) return false;
+
+    std::vector<size_t> msizes;
+    probeCandidates(sample, shared, models, msizes);
+    size_t mbest = 0;
+    for (size_t i = 1; i < models.size(); ++i) {
+        if (msizes[i] < msizes[mbest]) mbest = i;
+    }
+    if (msizes[mbest] == SIZE_MAX) return false;
+
+    // ---- stage 2: which level, for that model only --------------------------
+    std::vector<ModelCandidate> levels;
+    for (size_t li = 1; li < sizeof(kCalibLevels) / sizeof(kCalibLevels[0]); ++li) {
+        ModelCandidate x = models[mbest];
+        x.clevel = kCalibLevels[li];
+        levels.push_back(x);
+    }
+    std::vector<size_t> lsizes;
+    if (!levels.empty()) {
+        probeCandidates(sample, shared, levels, lsizes);
+    }
+
+    // Fold the two stages into one ranking over the levels of the chosen model.
+    std::vector<ModelCandidate> all{ models[mbest] };
+    std::vector<size_t> sizes{ msizes[mbest] };
+    for (size_t i = 0; i < levels.size(); ++i) {
+        if (lsizes[i] == SIZE_MAX) continue;
+        all.push_back(levels[i]);
+        sizes.push_back(lsizes[i]);
+    }
+
+    size_t best = 0;
+    for (size_t i = 1; i < all.size(); ++i) {
+        if (sizes[i] < sizes[best]) best = i;
+    }
+    // Prefer the cheapest level within kLevelSlack of the best, so a marginal
+    // gain never costs a large speed penalty.
+    size_t pick = best;
+    const double limit = (double)sizes[best] * (1.0 + kLevelSlack);
+    for (size_t i = 0; i < all.size(); ++i) {
+        if ((double)sizes[i] > limit) continue;
+        if (all[i].clevel < all[pick].clevel) pick = i;
+    }
+    winner = all[pick];
+    if (verbose) {
+        std::fprintf(stderr, "[calibrate] %.1f MB sample, %zu probes:",
+                     sample.size() / 1e6, models.size() + levels.size());
+        for (size_t i = 0; i < models.size(); ++i) {
+            if (msizes[i] == SIZE_MAX) continue;
+            std::fprintf(stderr, " %s/L%d=%.2fx", kModelName[models[i].model],
+                         models[i].clevel,
+                         (double)sample.size() / (double)msizes[i]);
+        }
+        for (size_t i = 0; i < levels.size(); ++i) {
+            if (lsizes[i] == SIZE_MAX) continue;
+            std::fprintf(stderr, " %s/L%d=%.2fx", kModelName[levels[i].model],
+                         levels[i].clevel,
+                         (double)sample.size() / (double)lsizes[i]);
+        }
+        std::fprintf(stderr, " -> %s at level %d\n", kModelName[winner.model],
+                     winner.clevel);
+    }
+    return true;
+}
+
 static int cmdCompressPicker(
         const std::string& modelDir,
         const std::string& in,
@@ -2167,7 +2432,17 @@ static int cmdCompressPicker(
 
     if (threads < 1) threads = 1;
     if (memBudgetMB < 1) memBudgetMB = 1;
-    uint64_t targetBytes = (uint64_t)memBudgetMB * 1024ull * 1024ull / threads;
+    // Budget accounting, done once and in one place. A worker holds its raw
+    // chunk, a reordered copy of it, and the frame it produces; kPerChunkCopies
+    // is the measured multiple of the chunk size that a worker costs. Sizing the
+    // chunk from budget/(threads*copies) makes peak memory ~= the budget with
+    // every thread still working. The previous code derived the chunk from
+    // budget/threads and *then* subtracted the same buffers from the budget
+    // again when sizing the pool, which double-counted them and collapsed the
+    // pool to a single worker.
+    constexpr uint64_t kPerChunkCopies = 4;
+    uint64_t targetBytes =
+            (uint64_t)memBudgetMB * 1024ull * 1024ull / ((uint64_t)threads * kPerChunkCopies);
     const uint64_t kMinChunk = 4ull * 1024 * 1024;
     if (targetBytes < kMinChunk) targetBytes = kMinChunk;
 
@@ -2182,11 +2457,34 @@ static int cmdCompressPicker(
         return 0;
     }
     uint64_t origSize = ranges.back().first + ranges.back().second;
-    long reserveMB = (long)((targetBytes * 3 * (uint64_t)std::min<size_t>(threads, nChunks)) / (1024 * 1024));
-    unsigned nWorkers =
-            memBudgetWorkers((unsigned)std::min<size_t>(threads, nChunks), reserveMB);
+    // The chunk size already encodes the budget, so every requested thread may
+    // run; the env overrides remain for users who want to cap the pool directly.
+    unsigned nWorkers = (unsigned)std::min<size_t>(threads, nChunks);
+    if (std::getenv("NYX_MAX_MEM_MB") || std::getenv("NYX_WORKER_MB")) {
+        long reserveMB = (long)((targetBytes * kPerChunkCopies
+                                 * (uint64_t)std::min<size_t>(threads, nChunks)) / (1024 * 1024));
+        nWorkers = memBudgetWorkers(nWorkers, reserveMB);
+    }
+    if (std::getenv("NYX_MEM_LOG"))
+        std::fprintf(stderr, "[nyx-mem] budget %u MB, %u threads -> %.0f MB chunks x %u workers\n",
+                     memBudgetMB, threads, targetBytes / 1e6, nWorkers);
 
-    std::vector<std::string> frames(nChunks);
+    // Frames are spilled to a temp file each as they are produced, not held in
+    // a vector until the end. Holding them made peak RSS scale with the input
+    // (13.5 GB on an 8.4 GB input) even though the finished archive was 1.08 GB,
+    // and the archive format needs every frame size before the first frame byte,
+    // so the sizes are collected here and the payload concatenated afterwards.
+    namespace fsx = std::filesystem;
+    const fsx::path spillDir =
+            fsx::path(out).parent_path() / (fsx::path(out).filename().string() + ".spill");
+    std::error_code spill_ec;
+    fsx::create_directories(spillDir, spill_ec);
+    auto spillPath = [&](size_t i) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "f%08zu", i);
+        return spillDir / buf;
+    };
+    std::vector<uint64_t> frameSizes(nChunks, 0);
     std::vector<ChunkPick> picks(nChunks);
     std::atomic<size_t> nextIdx{ 0 };
 
@@ -2207,8 +2505,39 @@ static int cmdCompressPicker(
         }
     }
 
+    // Calibrate the model on one chunk before compressing the rest, now that the
+    // compressors exist. The chunk in the middle of the file is more
+    // representative than the first: the head of a FASTQ run is often the least
+    // typical part of it. Skipped for a single-chunk input, where calibrating
+    // costs as much as just compressing it.
+    ModelCandidate forced{};
+    bool haveForced = false, forcedIsNano = false;
+    if (!dryRun && nChunks > 1) {
+        std::ifstream cf(in, std::ios::binary);
+        if (cf) {
+            size_t mid = nChunks / 2;
+            std::string sample = readFileRange(cf, ranges[mid].first, ranges[mid].second);
+            if (sortReadsEnabled()) sortReadsInChunk(sample);
+            ChunkPick probe = pickForChunk(sample);
+            haveForced = calibrateModel(sample, shared, probe.isNano, forced,
+                                        std::getenv("NYX_PICKER_LOG") != nullptr);
+            forcedIsNano = haveForced && (forced.model == MODEL_NANO_LZ
+                                          || forced.model == MODEL_NANO_ZSTD);
+        }
+    }
+
+    // A CCtx reused across chunks accumulates internal state that is never
+    // released: peak RSS tracked the number of chunks compressed rather than the
+    // working set (13.5 GB on an 8.4 GB input at a 500 MB budget, growing
+    // linearly while the output file was still empty). NYX_REUSE_CCTX=1 restores
+    // the old behaviour for comparison.
+    const bool reuseCCtx = [] {
+        const char* e = std::getenv("NYX_REUSE_CCTX");
+        return e && e[0] == '1';
+    }();
     auto worker = [&]() {
-        openzl::CCtx cctx;   // one context per thread, reused for every chunk
+        std::unique_ptr<openzl::CCtx> shared_cctx;
+        if (reuseCCtx) shared_cctx = std::make_unique<openzl::CCtx>();
         std::ifstream f(in, std::ios::binary);
         if (!f) return;
         for (;;) {
@@ -2217,6 +2546,19 @@ static int cmdCompressPicker(
             std::string raw = readFileRange(f, ranges[i].first, ranges[i].second);
             if (sortReadsEnabled()) sortReadsInChunk(raw);
             ChunkPick pk = pickForChunk(raw);
+            // Use the calibrated winner where this chunk is the same kind of
+            // data the calibration saw; a chunk of the other kind keeps its own
+            // heuristic pick.
+            if (haveForced && pk.isNano == forcedIsNano) {
+                pk.model     = forced.model;
+                pk.route     = forced.route;
+                pk.routeCode = (forced.route == SeqRoute::BigLz) ? 1 : 0;
+            }
+            // The level is a property of the file, not of the chunk, so it
+            // applies whatever model this chunk ends up using. It is not
+            // recorded in the archive: zstd frames are self-describing, so the
+            // decoder never needs to know which level produced them.
+            g_clevelOverride = haveForced ? forced.clevel : 0;
             pk.model = resolveModel(pk.model);
             if (!dryRun) {
                 openzl::Compressor* c = shared[pk.model].get();
@@ -2224,9 +2566,21 @@ static int cmdCompressPicker(
                     for (int m = 0; m < MODEL_COUNT && !c; ++m) c = shared[m].get();
                 }
                 g_seqRouteOverride = pk.route;
-                frames[i]          = compressChunkBytesCtx(cctx, *c, raw);
+                {
+                    std::string fr;
+                    if (reuseCCtx) {
+                        fr = compressChunkBytesCtx(*shared_cctx, *c, raw);
+                    } else {
+                        openzl::CCtx fresh;      // released with the chunk
+                        fr = compressChunkBytesCtx(fresh, *c, raw);
+                    }
+                    frameSizes[i] = fr.size();
+                    std::ofstream sf(spillPath(i), std::ios::binary);
+                    sf.write(fr.data(), (std::streamsize)fr.size());
+                }
                 g_seqRouteOverride = SeqRoute::Unset;
             }
+            g_clevelOverride = 0;
             picks[i] = pk;
         }
     };
@@ -2247,14 +2601,21 @@ static int cmdCompressPicker(
             hdr.push_back((char)picks[i].model);
             hdr.push_back((char)picks[i].routeCode);
         }
-        for (const auto& fr : frames) putLE64(hdr, fr.size());
+        for (uint64_t fsz : frameSizes) putLE64(hdr, fsz);
         of.write(hdr.data(), (std::streamsize)hdr.size());
-        for (auto& fr : frames) {
-            of.write(fr.data(), (std::streamsize)fr.size());
-            fr.clear();
-            fr.shrink_to_fit();
+        std::vector<char> copybuf(1u << 20);
+        for (size_t i = 0; i < nChunks; ++i) {
+            std::ifstream sf(spillPath(i), std::ios::binary);
+            for (;;) {
+                sf.read(copybuf.data(), (std::streamsize)copybuf.size());
+                std::streamsize got = sf.gcount();
+                if (got <= 0) break;
+                of.write(copybuf.data(), got);
+            }
         }
     }
+
+    fsx::remove_all(spillDir, spill_ec);
 
     // Report the per-chunk routing distribution (acceptance test for the
     // picker). Per-chunk lines when NYX_PICKER_LOG=1; always a final summary.
@@ -2659,7 +3020,7 @@ static int cmdCompressGlobalCluster(
         };
         unsigned nW = memBudgetWorkers(
                 (unsigned)std::min<size_t>(threads, std::max<size_t>(1, nSub)),
-                reserveMB);
+                reserveMB, (long)memBudgetMB);
         std::vector<std::thread> pool;
         for (unsigned t = 0; t < nW; ++t) pool.emplace_back(worker);
         for (auto& th : pool) th.join();
@@ -2789,7 +3150,7 @@ static int cmdCompress(
     // In-flight = up to poolReq raw chunks + a bounded backlog of finished
     // frames (both ~targetBytes each) waiting for the in-order writer.
     long reserveMB = (long)((targetBytes * 4 * (uint64_t)poolReq) / (1024 * 1024)) + 128;
-    unsigned nWorkers = memBudgetWorkers(poolReq, reserveMB);
+    unsigned nWorkers = memBudgetWorkers(poolReq, reserveMB, (long)memBudgetMB);
 
     // ONE shared Compressor (immutable trained graph); each worker only holds a
     // per-thread CCtx. Deserializing it per worker was the main memory blow-up.
@@ -2836,8 +3197,17 @@ static int cmdCompress(
         }
     });
 
+    // A CCtx reused across chunks accumulates internal state that is never
+    // released: peak RSS tracked the number of chunks compressed rather than the
+    // working set (13.5 GB on an 8.4 GB input at a 500 MB budget, growing
+    // linearly while the output file was still empty). NYX_REUSE_CCTX=1 restores
+    // the old behaviour for comparison.
+    const bool reuseCCtx = [] {
+        const char* e = std::getenv("NYX_REUSE_CCTX");
+        return e && e[0] == '1';
+    }();
     auto worker = [&]() {
-        openzl::CCtx cctx;   // one context per thread, reused for every chunk
+        openzl::CCtx cctx;   // one per thread; this path already bounds its backlog
         std::ifstream f(in, std::ios::binary);
         if (!f) return;
         for (;;) {
@@ -3181,6 +3551,15 @@ static void usage()
 
 int main(int argc, char** argv)
 {
+    // Chunk buffers are allocated and freed once per chunk on every worker
+    // thread. glibc keeps freed blocks of this size in its per-thread arenas
+    // rather than returning them, so RSS tracked the number of chunks processed
+    // -- 13.5 GB on an 8.4 GB input at a 500 MB budget, growing linearly while
+    // the output file was still empty. Routing anything above 1 MB through mmap
+    // makes free() actually release it, which is what makes the memory budget
+    // hold on large inputs rather than only on small ones.
+    mallopt(M_MMAP_THRESHOLD, 1 << 20);
+    mallopt(M_TRIM_THRESHOLD, 1 << 20);
     try {
         if (argc < 2) {
             nyx::usage();

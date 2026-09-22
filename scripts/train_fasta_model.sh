@@ -4,11 +4,15 @@
 #
 #   scripts/train_fasta_model.sh [output.zlc]
 #
-# Corpus: small whole genomes + size-capped samples of the large ones, spanning
-# GC content, repeat/soft-mask density and IUPAC usage:
-#   E. coli, S. cerevisiae, A. thaliana (whole / capped)
-#   H. sapiens T2T, M. musculus GRCm39, T. aestivum (wheat)  -- ~30 MiB samples
-# All are FAV5-encoded, then one `zli train --profile serial` over the lot.
+# Corpus: small whole genomes + size-capped samples of large ones, spanning GC
+# content, repeat/soft-mask density and IUPAC usage. None is a benchmark genome:
+#   E. coli K-12, S. cerevisiae R64 (whole); A. thaliana TAIR10.1 (sample)
+#   rhesus macaque Mmul_10, rat mRatBN7.2, barley MorexV3   -- ~30 MiB samples
+# The large three stand in for the benchmark's human, mouse and wheat: related
+# genomes of the same kind, not the same genomes. The previous corpus used
+# T2T-CHM13, GRCm39 and IWGSC wheat themselves, i.e. three of the four
+# assemblies the paper reports on. scripts/download_fasta_train.sh fetches this.
+# All are FAV5-encoded, then one `zli train` per candidate profile over the lot.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ZLI="$HERE/openzl/zli"
@@ -24,13 +28,14 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/chunks"
 
 # name:path:mode  (whole = use as-is; sample = cap to $SMPL MiB whole-records)
+T="${FASTA_TRAIN_DIR:-$HERE/data/fasta_train_heldout}"
 ENTRIES=(
-  "ecoli:$HERE/data/fasta_train/ecoli_K12.fna:whole"
-  "yeast:$HERE/data/fasta_train/yeast_S288C.fna:whole"
-  "athal:$HERE/data/fasta_train/athaliana.fna:sample"
-  "human:$HERE/data/GCA_009914755.4_T2T-CHM13v2.0_genomic.fna:sample"
-  "mouse:$HERE/data/GCF_000001635.27_GRCm39_genomic.fna:sample"
-  "wheat:$HERE/data/GCF_018294505.1_IWGSC_CS_RefSeq_v2.1_genomic.fna:sample"
+  "ecoli:$T/GCF_000005845.2_ASM584v2_genomic.fna:whole"
+  "yeast:$T/GCF_000146045.2_R64_genomic.fna:whole"
+  "athal:$T/GCF_000001735.4_TAIR10.1_genomic.fna:sample"
+  "macaque:$T/GCF_003339765.1_Mmul_10_genomic.fna:sample"
+  "rat:$T/GCF_015227675.2_mRatBN7.2_genomic.fna:sample"
+  "barley:$T/GCF_904849725.1_MorexV3_pseudomolecules_assembly_genomic.fna:sample"
 )
 
 n=0
@@ -110,7 +115,7 @@ for p in $CANDIDATES; do
     cand="$WORK/model_$p.zlc"
     echo "  training candidate: $p"
     "$ZLI" train "$WORK/chunks" --profile "$p" "${TRAINER_ARGS[@]}" \
-        --output "$cand" --force --threads "$(nproc)" --use-all-samples \
+        --output "$cand" --force --threads "${SLURM_CPUS_ON_NODE:-$(nproc)}" --use-all-samples \
         --max-time-secs "$MAXT" >"$WORK/train_$p.log" 2>&1 || true
     if [ ! -s "$cand" ]; then
       echo "    $p: training produced nothing -- $(tail -n2 "$WORK/train_$p.log" 2>/dev/null | tr '\n' ' ')"
