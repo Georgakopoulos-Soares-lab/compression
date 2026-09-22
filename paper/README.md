@@ -7,5 +7,5 @@ itself is tracked so the path exists on a fresh clone; everything inside is
 ignored by `.gitignore` except this README. Keep drafts here rather than in
 `docs/`, which *is* tracked.
 
-Figures for the manuscript are regenerated from `results/paper/` — see the
-README there for which benchmark run each number comes from.
+Figures for the manuscript are regenerated from the benchmark CSVs in
+`results/` by `src/plot_paper_figures.py`, which writes them to `plots/paper/`.
