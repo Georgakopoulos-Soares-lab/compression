@@ -2508,15 +2508,39 @@ static int cmdCompressPicker(
     // Calibrate the model on one chunk before compressing the rest, now that the
     // compressors exist. The chunk in the middle of the file is more
     // representative than the first: the head of a FASTQ run is often the least
-    // typical part of it. Skipped for a single-chunk input, where calibrating
-    // costs as much as just compressing it.
+    // typical part of it.
+    //
+    // A single-chunk input is calibrated too, on a record-aligned prefix of at
+    // most kCalibBytes. It used to be skipped, on the grounds that calibrating
+    // costs as much as compressing; but the fallback is the read-length
+    // heuristic, which can pick the worst model, and the chunk size comes from
+    // budget / (threads * copies) -- so the same small file formed one chunk at
+    // one thread and several at sixteen, and compressed 36% larger at one
+    // thread. The ratio must not depend on the thread count. 4 MB picks the same
+    // model as 16 MB on every file measured, byte-identical archives, in half the
+    // time (2.6 s against 5.3 s on a 15 MB file).
     ModelCandidate forced{};
     bool haveForced = false, forcedIsNano = false;
-    if (!dryRun && nChunks > 1) {
+    if (!dryRun && nChunks >= 1) {
         std::ifstream cf(in, std::ios::binary);
         if (cf) {
-            size_t mid = nChunks / 2;
-            std::string sample = readFileRange(cf, ranges[mid].first, ranges[mid].second);
+            std::string sample;
+            if (nChunks > 1) {
+                size_t mid = nChunks / 2;
+                sample = readFileRange(cf, ranges[mid].first, ranges[mid].second);
+            } else {
+                // A chunk starts on a record boundary, so cutting the prefix after
+                // a multiple of four lines keeps every sampled record whole.
+                static const uint64_t kCalibBytes = 4ull << 20;
+                sample = readFileRange(cf, ranges[0].first,
+                                       std::min<uint64_t>(ranges[0].second, kCalibBytes));
+                if (ranges[0].second > kCalibBytes) {
+                    size_t lines = 0, cut = 0;
+                    for (size_t i = 0; i < sample.size(); ++i)
+                        if (sample[i] == '\n' && (++lines % 4) == 0) cut = i + 1;
+                    sample.resize(cut);
+                }
+            }
             if (sortReadsEnabled()) sortReadsInChunk(sample);
             ChunkPick probe = pickForChunk(sample);
             haveForced = calibrateModel(sample, shared, probe.isNano, forced,
