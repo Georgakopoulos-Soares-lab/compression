@@ -14,6 +14,27 @@ nyx decompress reads.fastq.nyx    # -> reads.fastq, byte for byte
 
 ## Install
 
+### With conda
+
+The repository includes a conda recipe (`conda/`). Building it brings its own
+compilers, `cmake` and runtime libraries, so nothing needs to be installed on the
+system first, and `nyx` ends up on your `PATH`:
+
+```bash
+git clone https://github.com/Georgakopoulos-Soares-lab/compression
+cd compression
+conda install -n base -c conda-forge conda-build      # once, if you do not have it
+conda build conda/ -c conda-forge
+conda create -n nyx -c local -c conda-forge nyx
+conda activate nyx
+nyx test <any FASTA, FASTQ, VCF or BED file>
+```
+
+The build fetches OpenZL and compiles everything, which takes a few minutes; the
+package runs a byte-exact round trip on all four formats before it is accepted.
+
+### From source
+
 Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `cmake` 3.20 or
 newer, `git` and `zlib`. Python 3.8+ is needed only for the plotting and
 benchmark scripts, not for compressing anything.
@@ -37,6 +58,9 @@ Put `nyx` on your `PATH` with a symlink if you like — it finds its own directo
 ```bash
 ln -s "$PWD/nyx" ~/.local/bin/nyx
 ```
+
+Archives are interchangeable between the two installs: a file compressed by one
+decompresses byte-exact with the other.
 
 ## Use
 
@@ -158,14 +182,20 @@ artifacts/                   shipped models
 scripts/                     build, download, training and benchmark drivers
 results/                     benchmark CSVs; every figure and table reads from here
 tests/                       edge-case and hostile-input round-trip suites
+conda/                       conda recipe
 docs/                        per-format notes and what each competing tool preserves
 ```
 
 ## Citing
 
+If you use NYX, please cite:
+
 Patsakis M, Margaris A, Chronopoulos T, Mouratidis I, Georgakopoulos-Soares I.
 *Byte-exact, format-aware compression for FASTA, FASTQ, BED and VCF files.*
 (manuscript in preparation)
+
+The same citation is in [`CITATION.cff`](CITATION.cff), which GitHub shows as
+"Cite this repository" in the sidebar, with BibTeX and APA exports.
 
 ## License
 

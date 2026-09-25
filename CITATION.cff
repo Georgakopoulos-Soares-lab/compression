@@ -1,0 +1,45 @@
+cff-version: 1.2.0
+message: "If you use NYX, please cite the paper below."
+title: "NYX: format-aware compression for omics files"
+version: 1.0.0
+license: PolyForm-Noncommercial-1.0.0
+repository-code: "https://github.com/Georgakopoulos-Soares-lab/compression"
+abstract: >-
+  NYX losslessly compresses FASTA, FASTQ, VCF and BED files. A reversible,
+  format-specific transform rewrites each file into homogeneous streams, which
+  are compressed with pre-trained OpenZL graphs. Nothing is trained on the
+  user's data and every round trip is byte-exact.
+keywords:
+  - compression
+  - genomics
+  - FASTA
+  - FASTQ
+  - VCF
+  - BED
+  - OpenZL
+authors:
+  - given-names: Michail
+    family-names: Patsakis
+  - given-names: Alexandros
+    family-names: Margaris
+  - given-names: Theodore
+    family-names: Chronopoulos
+  - given-names: Ioannis
+    family-names: Mouratidis
+  - given-names: Ilias
+    family-names: Georgakopoulos-Soares
+preferred-citation:
+  type: article
+  title: "Byte-exact, format-aware compression for FASTA, FASTQ, BED and VCF files"
+  status: in-preparation
+  authors:
+    - given-names: Michail
+      family-names: Patsakis
+    - given-names: Alexandros
+      family-names: Margaris
+    - given-names: Theodore
+      family-names: Chronopoulos
+    - given-names: Ioannis
+      family-names: Mouratidis
+    - given-names: Ilias
+      family-names: Georgakopoulos-Soares
