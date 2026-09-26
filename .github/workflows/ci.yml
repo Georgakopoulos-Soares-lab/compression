@@ -51,6 +51,16 @@ jobs:
           export OMP_NUM_THREADS=2
           bash tests/test_bed_roundtrip.sh
 
+      - name: "Gzipped input: contents round-trip, the user is told, nothing wrong is left behind"
+        run: |
+          export OMP_NUM_THREADS=2
+          bash tests/test_gzip_input.sh
+
+      - name: "Corrupted archives fail to decompress, never decode to wrong output"
+        run: |
+          export OMP_NUM_THREADS=2
+          bash tests/test_corruption.sh --flips 40
+
       - name: Single entry point handles every format byte-exactly
         run: |
           set -euo pipefail
@@ -72,7 +82,7 @@ jobs:
           set -euo pipefail
           export OMP_NUM_THREADS=2
           in=tests/vcf_edge_cases/sites_only.vcf
-          ./nyx compress --threads 2 --quiet "$in" /tmp/ci.nvcf
-          a=$(stat -c%s "$in"); b=$(stat -c%s /tmp/ci.nvcf)
+          ./nyx compress --threads 2 --quiet "$in" /tmp/ci.nyx
+          a=$(stat -c%s "$in"); b=$(stat -c%s /tmp/ci.nyx)
           echo "$a -> $b"
           [ "$b" -lt "$a" ] || { echo "archive is not smaller than the input"; exit 1; }
