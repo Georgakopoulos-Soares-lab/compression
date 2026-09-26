@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # thread_scaling.sh — how NYX's throughput and memory move with the thread count.
 #
-#   scripts/thread_scaling.sh [--threads "1 2 4 8 16"] [--out results/thread_scaling.csv]
+#   scripts/thread_scaling.sh [--threads "1 2 4 8 16"] [--only vcf|fasta|fastq]
+#                             [--out results/thread_scaling.csv]
+#
+# --only re-measures one format and replaces just its rows in the CSV, so a
+# codec or model change does not force an hour of re-running the other two.
 #
 # Every speed claim in the paper is measured at 16 threads, which invites the
 # obvious objection: is NYX faster than xz -9e, or just more parallel? The
@@ -17,9 +21,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 OUT="$HERE/results/thread_scaling.csv"
 THREADS_LIST="1 2 4 8 16"
+ONLY=""
+# FASTQ runs at the budget the FASTQ table in results/fastq_bench.csv used, so
+# the 16-thread row here can be checked against that table directly.
+FASTQ_MEM_MB="${FASTQ_MEM_MB:-1000}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --threads) THREADS_LIST="$2"; shift 2;;
+    --only)    ONLY="$(echo "$2" | tr a-z A-Z)"; shift 2;;
     --out)     OUT="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -37,20 +46,28 @@ measure() {
   case "$MEASURE_RSS" in ''|*[!0-9]*) MEASURE_RSS=0;; esac
 }
 
-echo "format,file,orig_bytes,threads,comp_bytes,ratio,comp_sec,decomp_sec,comp_MBps,peak_RSS_MB,roundtrip" > "$OUT"
+HEADER="format,file,orig_bytes,threads,comp_bytes,ratio,comp_sec,decomp_sec,comp_MBps,peak_RSS_MB,roundtrip"
+if [ -n "$ONLY" ] && [ -s "$OUT" ]; then
+  # keep the other formats' rows; this format's are rewritten below
+  { echo "$HEADER"; tail -n +2 "$OUT" | awk -F, -v f="$ONLY" '$1 != f'; } > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+else
+  echo "$HEADER" > "$OUT"
+fi
 
 # One representative file per format, matching plot_paper_figures.REPRESENTATIVE.
 run() { # <format> <path>
-  local fmt="$1" f="$2" b sz t z r cs ds rss rt
+  local fmt="$1" f="$2" b sz t z r cs ds rss rt mem=()
+  [ -z "$ONLY" ] || [ "$ONLY" = "$fmt" ] || return 0
   [ -s "$f" ] || { echo "skip $fmt: no $f"; return; }
+  [ "$fmt" = FASTQ ] && mem=(--max-mem-mb "$FASTQ_MEM_MB")
   b=$(basename "$f"); sz=$(stat -c%s "$f")
   echo "== $fmt $b ($sz bytes)"
   for t in $THREADS_LIST; do
     z="$SCRATCH/t.z"; r="$SCRATCH/t.rt"; rm -f "$z" "$r"
-    measure "$HERE/nyx" compress "$f" "$z" --threads "$t" --quiet
+    measure "$HERE/nyx" compress "$f" "$z" --threads "$t" --quiet --force "${mem[@]}"
     cs=$MEASURE_SEC; rss=$MEASURE_RSS
     if [ ! -s "$z" ]; then echo "  !! $t threads produced nothing"; continue; fi
-    measure "$HERE/nyx" decompress "$z" "$r" --threads "$t"
+    measure "$HERE/nyx" decompress "$z" "$r" --threads "$t" --force
     ds=$MEASURE_SEC
     if cmp -s "$f" "$r"; then rt=OK; else rt=MISMATCH; echo "  !! ROUND TRIP FAILED at $t threads"; fi
     awk -v fm="$fmt" -v fi="$b" -v o="$sz" -v th="$t" -v c="$(stat -c%s "$z")" \

@@ -14,8 +14,30 @@ nyx decompress reads.fastq.nyx    # -> reads.fastq, byte for byte
 
 ## Install
 
-Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `git`, `zlib`,
-and Python 3.8+ only for the plotting and benchmark scripts.
+### With conda
+
+The repository includes a conda recipe (`conda/`). Building it brings its own
+compilers, `cmake` and runtime libraries, so nothing needs to be installed on the
+system first, and `nyx` ends up on your `PATH`:
+
+```bash
+git clone https://github.com/Georgakopoulos-Soares-lab/compression
+cd compression
+conda install -n base -c conda-forge conda-build      # once, if you do not have it
+conda build conda/ -c conda-forge
+conda create -n nyx -c local -c conda-forge nyx
+conda activate nyx
+nyx test <any FASTA, FASTQ, VCF or BED file>
+```
+
+The build fetches OpenZL and compiles everything, which takes a few minutes; the
+package runs a byte-exact round trip on all four formats before it is accepted.
+
+### From source
+
+Requirements: Linux, `g++` with C++17 (GCC 9 or newer), `make`, `cmake` 3.20 or
+newer, `git` and `zlib`. Python 3.8+ is needed only for the plotting and
+benchmark scripts, not for compressing anything.
 
 ```bash
 git clone https://github.com/Georgakopoulos-Soares-lab/compression
@@ -37,15 +59,17 @@ Put `nyx` on your `PATH` with a symlink if you like — it finds its own directo
 ln -s "$PWD/nyx" ~/.local/bin/nyx
 ```
 
+Archives are interchangeable between the two installs: a file compressed by one
+decompresses byte-exact with the other.
+
 ## Use
 
 One command handles every format. The format is read from the file's **content**,
-not its name, so a VCF called `.txt` is still a VCF and gzip/bgzip input is read
-through transparently.
+not its name, so a VCF called `.txt` is still a VCF.
 
 ```bash
 nyx compress   calls.vcf                    # -> calls.vcf.nyx
-nyx compress   genome.fa.gz archive.nyx     # explicit output name
+nyx compress   genome.fa archive.nyx        # explicit output name
 nyx compress   reads.fastq --verify         # decompress and compare before exiting
 nyx compress   peaks.narrowPeak --threads 8 --max-mem-mb 2000
 nyx decompress calls.vcf.nyx                # -> calls.vcf
@@ -53,11 +77,19 @@ nyx info       calls.vcf.nyx                # what this file is
 nyx test       calls.vcf                    # round-trip check, keeps nothing
 ```
 
+**Gzipped input.** `nyx compress calls.vcf.gz` unzips the file and compresses its
+contents: the archive is `calls.vcf.nyx`, and decompressing it gives back
+`calls.vcf`, **not** the `.gz` file. `nyx` says so when it runs. Recreating the
+exact `.gz` bytes is not possible in general, because they depend on the gzip
+program, version and level that wrote them, so NYX guarantees the round trip of
+the contents instead, and `--verify` and `nyx test` check exactly that. The
+unzipped contents are staged in `$TMPDIR` while compressing.
+
 | option | meaning |
 |---|---|
 | `--threads N` | worker threads (default: every core) |
 | `--max-mem-mb N` | memory budget in MB. Defaults: 4000 for FASTA and BED, 500 for FASTQ; VCF uses 64 MB blocks unless a budget is given |
-| `--verify` | decompress the new archive and compare it with the input |
+| `--verify` | decompress the new archive and compare it with the input; if they differ, the archive is deleted and `nyx` exits with an error |
 | `--force`, `-f` | overwrite an existing output file |
 | `--format F` | `vcf`, `fasta`, `fastq` or `bed`, if detection gets it wrong |
 | `--quiet`, `-q` | print nothing unless something fails |
@@ -86,7 +118,9 @@ byte comparison. The CSVs behind this are in `results/`.
 Where each format stands, stated plainly:
 
 - **VCF** — the highest ratio of any codec tested on 9 of 10 files, up to 2.0× the
-  best general-purpose codec, at 14–37× the speed of `zstd -19`.
+  best general-purpose codec, at 5–17× the speed of `zstd -19` on most files. On
+  the phased 1000 Genomes panels `zstd -19` is about as fast (1.4× faster on
+  chr20), at less than half NYX's ratio.
 - **BED** — the highest ratio on all 34 files, 1.2–2.3× the best general-purpose
   codec. On files under ~50 MB, `xz` with a blocked stream compresses faster.
 - **FASTQ** — a better ratio than every general-purpose codec on all six runs, and
@@ -111,10 +145,17 @@ An empty file, a byte-order mark, CR-only line endings, ragged columns, or a fil
 that is not the format at all is stored rather than refused or mangled, so the
 tool is total: any file goes in and the same bytes come out.
 
+Every compressed stream in an archive is an OpenZL frame carrying checksums of
+both its compressed bytes and its decompressed content (OpenZL's default, which
+NYX keeps enabled), so a damaged archive fails to decompress instead of
+producing wrong output. NYX's own container headers carry no separate checksum.
+
 ```bash
 bash tests/test_vcf_roundtrip.sh   # 155 cases
 bash tests/test_seq_roundtrip.sh   # 36 FASTA/FASTQ cases
 bash tests/test_bed_roundtrip.sh   # 49 BED cases
+bash tests/test_gzip_input.sh      # gzipped input, all four formats
+bash tests/test_corruption.sh      # random bit flips must never decode to wrong output
 ```
 
 ## Models
@@ -157,14 +198,20 @@ artifacts/                   shipped models
 scripts/                     build, download, training and benchmark drivers
 results/                     benchmark CSVs; every figure and table reads from here
 tests/                       edge-case and hostile-input round-trip suites
+conda/                       conda recipe
 docs/                        per-format notes and what each competing tool preserves
 ```
 
 ## Citing
 
+If you use NYX, please cite:
+
 Patsakis M, Margaris A, Chronopoulos T, Mouratidis I, Georgakopoulos-Soares I.
 *Byte-exact, format-aware compression for FASTA, FASTQ, BED and VCF files.*
 (manuscript in preparation)
+
+The same citation is in [`CITATION.cff`](CITATION.cff), which GitHub shows as
+"Cite this repository" in the sidebar, with BibTeX and APA exports.
 
 ## License
 

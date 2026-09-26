@@ -35,36 +35,37 @@ if [ ! -x "$HERE/openzl/zli" ]; then
   exit 1
 fi
 
-# 3) Build the biocompress preprocessor tool
+# 3) Build the NYX tools. CPPFLAGS/LDFLAGS carry include and library paths when
+# a packager sets them (conda puts zlib under $PREFIX); empty in a normal build.
 cd "$HERE"
 
-g++ -O3 -std=c++17 -pthread \
+"${CXX:-g++}" ${CPPFLAGS:-} -O3 -std=c++17 -pthread \
   -o "$HERE/tools/biocompress_preprocessor" \
   "$HERE/tools/biocompress_preprocessor.cpp"
 
 # 3b) FASTA decoder (inverse of the FAV5 packed format -> exact original FASTA)
-g++ -O2 -std=c++17 \
+"${CXX:-g++}" ${CPPFLAGS:-} -O2 -std=c++17 \
   -o "$HERE/tools/fasta_postprocess" \
   "$HERE/tools/fasta_postprocess.cpp"
 
 # 4) Build the BED compressor (column model + OpenZL, in-process)
-g++ -O3 -std=c++17 -pthread \
+"${CXX:-g++}" ${CPPFLAGS:-} -O3 -std=c++17 -pthread \
   -o "$HERE/tools/nyx_bed" "$HERE/tools/nyx_bed.cpp" \
   -I"$HERE/openzl/include" -I"$HERE/openzl/src" -I"$HERE/tools" \
   "$HERE/openzl/libopenzl.a" \
   "$HERE/openzl/deps/zstd/lib/libzstd.a" \
   "$HERE/openzl/deps/lz4/lib/liblz4.a" \
-  -lz
+  ${LDFLAGS:-} -lz
 
 
 # 6) Build the VCF compressor (format-aware transform + OpenZL, in-process)
-g++ -O3 -std=c++17 -pthread \
+"${CXX:-g++}" ${CPPFLAGS:-} -O3 -std=c++17 -pthread \
   -o "$HERE/tools/nyx_vcf" "$HERE/tools/nyx_vcf.cpp" \
   -I"$HERE/openzl/include" -I"$HERE/openzl/src" \
   "$HERE/openzl/libopenzl.a" \
   "$HERE/openzl/deps/zstd/lib/libzstd.a" \
   "$HERE/openzl/deps/lz4/lib/liblz4.a" \
-  -lz
+  ${LDFLAGS:-} -lz
 
 # 7) Build the FASTQ codec. It links OpenZL's whole object set rather than the
 # static library, so it has its own script; calling it here means one command

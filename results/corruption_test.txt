@@ -1,0 +1,7 @@
+# tests/test_corruption.sh --flips 150 on one real file per format (inputs listed in the script header)
+  c.vcf                        vcf       190091 B archive, 150 flips: 150 failed to decompress, 0 unaffected, 0 wrong output
+  b.bed                        bed       105600 B archive, 150 flips: 150 failed to decompress, 0 unaffected, 0 wrong output
+  r.fastq                      fastq     160407 B archive, 150 flips: 150 failed to decompress, 0 unaffected, 0 wrong output
+  m.fa                         fasta    5529600 B archive, 150 flips: 150 failed to decompress, 0 unaffected, 0 wrong output
+
+wrong output: 0

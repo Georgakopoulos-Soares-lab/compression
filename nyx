@@ -19,8 +19,12 @@
 #
 # One input file gives one output file, whatever the thread count. The format is
 # read from the file's contents, never from its name: a VCF called .txt is still
-# a VCF, and gzip-compressed input is seen through. Archives are recognised the
-# same way, so a renamed archive still decompresses.
+# a VCF. Archives are recognised the same way, so a renamed archive still
+# decompresses.
+#
+# Gzip/bgzip input (calls.vcf.gz) is unzipped and its contents are compressed:
+# the archive is calls.vcf.nyx and decompressing it gives calls.vcf, not the .gz.
+# The contents are staged in $TMPDIR while compressing.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 VERSION="1.0.0"
@@ -122,12 +126,12 @@ verify_archive() {        # verify_archive <format> <archive> <original>
   local fmt="$1" arc="$2" orig="$3" tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/nyx-verify.XXXXXX")"
   if ! decompress_to "$fmt" "$arc" "$tmp" >/dev/null 2>&1; then
-    rm -f "$tmp"; die "verification failed: $arc did not decompress"
+    rm -f "$tmp" "$arc"; die "verification failed: $arc did not decompress (archive removed)"
   fi
   if cmp -s "$orig" "$tmp"; then
     rm -f "$tmp"; say "verified: decompresses to the original, byte for byte"
   else
-    rm -f "$tmp"; die "verification failed: $arc does not reproduce $orig"
+    rm -f "$tmp" "$arc"; die "verification failed: $arc does not reproduce $orig (archive removed)"
   fi
 }
 
@@ -141,6 +145,20 @@ run() {
   [ $rc -eq 0 ] || cat "$log" >&2
   rm -f "$log"; return $rc
 }
+
+is_gzip() { [ "$(od -An -tx1 -N2 "$1" 2>/dev/null | tr -d ' \n')" = "1f8b" ]; }
+
+# Unzip gzip/bgzip input into $STAGE/contents. A codec cannot
+# rebuild someone else's .gz byte for byte -- the bytes depend on the gzip
+# implementation, version and level that wrote them -- so NYX compresses what
+# the .gz contains and says so, rather than restoring different bytes silently.
+stage_gzip() {
+  STAGE="$(mktemp -d "${TMPDIR:-/tmp}/nyx-gz.XXXXXX")"
+  gzip -dc "$1" > "$STAGE/contents" || die "$1 looks gzip-compressed but does not unzip"
+  SRC="$STAGE/contents"
+}
+STAGE=""
+trap '[ -n "$STAGE" ] && rm -rf "$STAGE"' EXIT
 
 human() { awk -v b="$1" 'BEGIN{ s="B KB MB GB TB"; split(s,u," "); i=1;
   while (b>=1024 && i<5) { b/=1024; i++ } printf (i==1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
@@ -170,13 +188,27 @@ case "$CMD" in
     FMT="${FMT:-$(detect_format "$IN")}"
     [ "$FMT" = unknown ] && die "could not tell what kind of file $IN is.
 Give the format:  nyx compress $IN --format vcf|fasta|fastq|bed"
-    OUT="${POS[1]:-$IN.nyx}"
+    SRC="$IN"; BASE="$IN"
+    if is_gzip "$IN"; then
+      BASE="${IN%.gz}"; BASE="${BASE%.bgz}"; BASE="${BASE%.gzip}"
+      [ "$BASE" = "$IN" ] && BASE="$IN.unzipped"
+    fi
+    OUT="${POS[1]:-$BASE.nyx}"
     [ -e "$OUT" ] && [ "$FORCE" = 0 ] && die "$OUT exists (use --force to overwrite)"
-    compress_to "$FMT" "$IN" "$OUT" || die "compression failed"
-    [ -s "$OUT" ] || die "compression produced no output"
-    [ "$VERIFY" = 1 ] && verify_archive "$FMT" "$OUT" "$IN"
-    IB=$(stat -c%s "$IN"); OB=$(stat -c%s "$OUT")
-    say "$(basename "$IN") ($FMT): $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')  -> $OUT"
+    if is_gzip "$IN"; then
+      stage_gzip "$IN"
+      say "note: $(basename "$IN") is gzip-compressed; the archive stores its contents, and decompressing it gives $(basename "$BASE"), not the .gz"
+    fi
+    compress_to "$FMT" "$SRC" "$OUT" || { rm -f "$OUT"; die "compression failed"; }
+    [ -s "$OUT" ] || { rm -f "$OUT"; die "compression produced no output"; }
+    [ "$VERIFY" = 1 ] && verify_archive "$FMT" "$OUT" "$SRC"
+    IB=$(stat -c%s "$SRC"); OB=$(stat -c%s "$OUT")
+    MSG="$(basename "$IN") ($FMT): $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')  -> $OUT"
+    if [ "$SRC" != "$IN" ]; then
+      GB=$(stat -c%s "$IN")
+      MSG="$MSG  ($(awk -v g="$GB" -v b="$OB" 'BEGIN{ if (g >= b) printf "%.2fx smaller than the .gz", g/b; else printf "larger than the %d-byte .gz", g }'))"
+    fi
+    say "$MSG"
     ;;
   decompress)
     [ "${#POS[@]}" -ge 1 ] || die "usage: nyx decompress <file.nyx> [out]"
@@ -201,12 +233,14 @@ Give the format:  nyx compress $IN --format vcf|fasta|fastq|bed"
     FMT="${FMT:-$(detect_format "$IN")}"
     [ "$FMT" = unknown ] && die "could not tell what kind of file $IN is (use --format)"
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/nyx-test.XXXXXX")"
-    trap 'rm -rf "$TMP"' EXIT
-    compress_to "$FMT" "$IN" "$TMP/a.nyx" >/dev/null 2>&1 || die "compression failed"
+    trap 'rm -rf "$TMP"; [ -n "$STAGE" ] && rm -rf "$STAGE"' EXIT
+    SRC="$IN"; NOTE=""
+    if is_gzip "$IN"; then stage_gzip "$IN"; NOTE="  (gzip input: checked against its unzipped contents)"; fi
+    compress_to "$FMT" "$SRC" "$TMP/a.nyx" >/dev/null 2>&1 || die "compression failed"
     decompress_to "$FMT" "$TMP/a.nyx" "$TMP/b" >/dev/null 2>&1 || die "decompression failed"
-    cmp -s "$IN" "$TMP/b" || die "MISMATCH: $IN does not survive the round trip"
-    IB=$(stat -c%s "$IN"); OB=$(stat -c%s "$TMP/a.nyx")
-    echo "$(basename "$IN") ($FMT): byte-exact round trip, $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')"
+    cmp -s "$SRC" "$TMP/b" || die "MISMATCH: $IN does not survive the round trip"
+    IB=$(stat -c%s "$SRC"); OB=$(stat -c%s "$TMP/a.nyx")
+    echo "$(basename "$IN") ($FMT): byte-exact round trip, $(human "$IB") -> $(human "$OB")  $(awk -v a="$IB" -v b="$OB" 'BEGIN{printf "%.2fx", a/b}')$NOTE"
     ;;
   info)
     [ "${#POS[@]}" -eq 1 ] || die "usage: nyx info <file>"
